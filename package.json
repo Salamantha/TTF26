@@ -11,7 +11,7 @@
     "inspect": "npx @modelcontextprotocol/inspector http://localhost:3000/api/mcp"
   },
   "dependencies": {
-    "@upstash/redis": "^1.34.0",
+    "@neondatabase/serverless": "^1.2.0",
     "mcp-handler": "^2.0.0",
     "next": "^15.0.0",
     "react": "^18.3.0",

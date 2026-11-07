@@ -44,7 +44,7 @@ other stands in the same category.
 - `scripts/build-widget.mjs` — bundles `widget/map3d.ts` with three.js into `lib/widget-bundle.generated.ts`
   (gitignored; runs automatically before `npm run dev` and `npm run build`)
 - `lib/widget.ts` — the widget HTML: venue geometry embedded once, plus the bundle and the text panel
-- `lib/store.ts` — obstacles, "confirmed working" times and leaderboards (Upstash Redis, or memory when not configured)
+- `lib/store.ts` — obstacles, "confirmed working" times and leaderboards (Neon Postgres, or memory when not configured)
 - `app/map/route.ts` — the same widget as a standalone page, buttons included: `/map?from=entrance&to=TTF%20Hackathon&mobility=wheelchair` (add `&heat` to start with the heatmap on)
 
 ## Tools
@@ -95,10 +95,11 @@ npm run dev
 Pushing to `main` deploys on Vercel. Set `APP_BASE_URL=https://<your-domain>` so map links point
 at production (otherwise it falls back to Vercel's production URL).
 
-**Database (needed for records and reports to survive cold starts):** in the Vercel project open
-Storage → Marketplace → Upstash Redis (free plan) → connect it to this project, then redeploy. The
-integration sets `KV_REST_API_URL` / `KV_REST_API_TOKEN`, which `lib/store.ts` reads (plain
-`UPSTASH_REDIS_REST_URL` / `_TOKEN` work too). Until then the widget says times are kept in memory only.
+**Database (needed for records and reports to survive cold starts):** Neon Postgres, added through
+Vercel → Storage → Neon and connected to this project. The integration sets `DATABASE_URL`, which
+`lib/store.ts` reads (`POSTGRES_URL` works too); the tables `ttf_obstacles`, `ttf_confirmations` and
+`ttf_attempts` are created on first use. Redeploy after connecting so the function sees the variable.
+Without it everything is kept in memory and the widget's record card says so.
 
 ## Connect it to ChatGPT
 

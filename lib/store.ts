@@ -1,8 +1,7 @@
 // Live state: reported obstacles, "still working" confirmations and the route-race leaderboard.
-// Backed by Upstash Redis when configured (Vercel's Upstash integration sets KV_REST_API_URL /
-// KV_REST_API_TOKEN; plain Upstash uses UPSTASH_REDIS_REST_*). Without it everything lives in memory and
-// resets whenever the serverless function cold-starts.
-import { Redis } from "@upstash/redis";
+// Stored in Postgres (Neon) when DATABASE_URL is set — Vercel's Neon integration sets it; the tables are
+// created on first use. Without it everything lives in memory and resets on every cold start.
+import { neon } from "@neondatabase/serverless";
 
 export interface ObstacleRecord {
   placeId: string;
@@ -24,31 +23,57 @@ export interface Attempt {
 
 export type Mobility = "walk" | "cane" | "wheelchair";
 
-const OBSTACLES_KEY = "obstacles:v2";
-const CONFIRM_KEY = "confirm:v1";
-const lbKey = (fromId: string, toId: string, mobility: Mobility) => `lb:v2:${fromId}->${toId}:${mobility}`;
+const routeKey = (fromId: string, toId: string, mobility: Mobility) => `${fromId}->${toId}:${mobility}`;
 
-const url = process.env.KV_REST_API_URL ?? process.env.UPSTASH_REDIS_REST_URL;
-const token = process.env.KV_REST_API_TOKEN ?? process.env.UPSTASH_REDIS_REST_TOKEN;
-const redis = url && token ? new Redis({ url, token }) : null;
-export const PERSISTENT = !!redis;
+const url = process.env.DATABASE_URL ?? process.env.POSTGRES_URL;
+const sql = url ? neon(url) : null;
+export const PERSISTENT = !!sql;
+
+const SCHEMA = [
+  `create table if not exists ttf_obstacles (place_id text primary key, record jsonb not null)`,
+  `create table if not exists ttf_confirmations (place_id text primary key, confirmed_at timestamptz not null)`,
+  `create table if not exists ttf_attempts (id bigserial primary key, route_key text not null, holder text not null, seconds integer not null, recorded_at timestamptz not null default now())`,
+  `create index if not exists ttf_attempts_route_seconds on ttf_attempts (route_key, seconds)`,
+];
+let ready: Promise<void> | null = null;
+
+async function db() {
+  if (!sql) return null;
+  ready ??= (async () => {
+    for (const s of SCHEMA) await sql.query(s);
+  })().catch((e) => {
+    ready = null;
+    throw e;
+  });
+  await ready;
+  return sql;
+}
+
+const iso = (v: unknown) => new Date(v as string).toISOString();
 
 const mem = {
   obstacles: new Map<string, ObstacleRecord>(),
   confirm: new Map<string, string>(),
-  lb: new Map<string, Attempt[]>(),
+  attempts: new Map<string, Attempt[]>(),
 };
 
 export async function getObstacles(): Promise<Record<string, ObstacleRecord>> {
-  if (!redis) return Object.fromEntries(mem.obstacles);
-  return (await redis.hgetall<Record<string, ObstacleRecord>>(OBSTACLES_KEY)) ?? {};
+  const q = await db();
+  if (!q) return Object.fromEntries(mem.obstacles);
+  const rows = await q.query(`select place_id, record from ttf_obstacles`);
+  return Object.fromEntries(rows.map((r) => [r.place_id, r.record as ObstacleRecord]));
 }
 
 export async function setObstacle(record: Omit<ObstacleRecord, "reportedAt">) {
   const full: ObstacleRecord = { ...record, reportedAt: new Date().toISOString() };
-  if (redis) await redis.hset(OBSTACLES_KEY, { [record.placeId]: full });
-  else mem.obstacles.set(record.placeId, full);
-  // A blocked report invalidates any earlier "it works" confirmation, a clear report counts as one.
+  const q = await db();
+  if (q) {
+    await q.query(
+      `insert into ttf_obstacles (place_id, record) values ($1, $2) on conflict (place_id) do update set record = excluded.record`,
+      [record.placeId, JSON.stringify(full)]
+    );
+  } else mem.obstacles.set(record.placeId, full);
+  // A blocked report invalidates any earlier "it works" confirmation; a clear report counts as one.
   if (record.status === "blocked") await clearConfirmation(record.placeId);
   else await confirmWorking(record.placeId);
   return full;
@@ -56,44 +81,52 @@ export async function setObstacle(record: Omit<ObstacleRecord, "reportedAt">) {
 
 /** placeId → ISO time someone last confirmed it works (e.g. "Lift West is running"). */
 export async function getConfirmations(): Promise<Record<string, string>> {
-  if (!redis) return Object.fromEntries(mem.confirm);
-  return (await redis.hgetall<Record<string, string>>(CONFIRM_KEY)) ?? {};
+  const q = await db();
+  if (!q) return Object.fromEntries(mem.confirm);
+  const rows = await q.query(`select place_id, confirmed_at from ttf_confirmations`);
+  return Object.fromEntries(rows.map((r) => [r.place_id, iso(r.confirmed_at)]));
 }
 
 async function confirmWorking(placeId: string) {
-  const at = new Date().toISOString();
-  if (redis) await redis.hset(CONFIRM_KEY, { [placeId]: at });
-  else mem.confirm.set(placeId, at);
+  const q = await db();
+  if (q) {
+    await q.query(
+      `insert into ttf_confirmations (place_id, confirmed_at) values ($1, now()) on conflict (place_id) do update set confirmed_at = now()`,
+      [placeId]
+    );
+  } else mem.confirm.set(placeId, new Date().toISOString());
 }
 
 async function clearConfirmation(placeId: string) {
-  if (redis) await redis.hdel(CONFIRM_KEY, placeId);
+  const q = await db();
+  if (q) await q.query(`delete from ttf_confirmations where place_id = $1`, [placeId]);
   else mem.confirm.delete(placeId);
 }
 
-const parse = (m: unknown): Omit<Attempt, "seconds"> => (typeof m === "string" ? JSON.parse(m) : (m as Omit<Attempt, "seconds">));
-
 /** Fastest `n` attempts for a route and profile; the first one is the record. */
 export async function getLeaderboard(fromId: string, toId: string, mobility: Mobility, n = 3): Promise<Attempt[]> {
-  const key = lbKey(fromId, toId, mobility);
-  if (!redis) return (mem.lb.get(key) ?? []).slice(0, n);
-  const raw = await redis.zrange<unknown[]>(key, 0, n - 1, { withScores: true });
-  const out: Attempt[] = [];
-  for (let i = 0; i + 1 < raw.length; i += 2) out.push({ ...parse(raw[i]), seconds: Number(raw[i + 1]) });
-  return out;
+  const key = routeKey(fromId, toId, mobility);
+  const q = await db();
+  if (!q) return (mem.attempts.get(key) ?? []).slice(0, n);
+  const rows = await q.query(
+    `select holder, seconds, recorded_at from ttf_attempts where route_key = $1 order by seconds, recorded_at limit $2`,
+    [key, n]
+  );
+  return rows.map((r) => ({ holder: r.holder, seconds: Number(r.seconds), recordedAt: iso(r.recorded_at) }));
 }
 
 export async function submitAttempt(fromId: string, toId: string, mobility: Mobility, seconds: number, holder: string) {
-  const key = lbKey(fromId, toId, mobility);
-  const attempt: Attempt = { holder, seconds, recordedAt: new Date().toISOString() };
+  const key = routeKey(fromId, toId, mobility);
   const before = (await getLeaderboard(fromId, toId, mobility, 1))[0] ?? null;
+  const q = await db();
   let rank: number;
-  if (redis) {
-    await redis.zadd(key, { score: seconds, member: JSON.stringify({ holder, recordedAt: attempt.recordedAt }) });
-    rank = (await redis.zcount(key, "-inf", `(${seconds}`)) + 1;
+  if (q) {
+    await q.query(`insert into ttf_attempts (route_key, holder, seconds) values ($1, $2, $3)`, [key, holder, seconds]);
+    const [{ n }] = await q.query(`select count(*)::int as n from ttf_attempts where route_key = $1 and seconds < $2`, [key, seconds]);
+    rank = Number(n) + 1;
   } else {
-    const list = [...(mem.lb.get(key) ?? []), attempt].sort((a, b) => a.seconds - b.seconds);
-    mem.lb.set(key, list);
+    const list = [...(mem.attempts.get(key) ?? []), { holder, seconds, recordedAt: new Date().toISOString() }].sort((a, b) => a.seconds - b.seconds);
+    mem.attempts.set(key, list);
     rank = list.filter((a) => a.seconds < seconds).length + 1;
   }
   return { isNewRecord: !before || seconds < before.seconds, previousRecord: before, rank, top: await getLeaderboard(fromId, toId, mobility) };
