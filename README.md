@@ -1,16 +1,13 @@
 # TTF Accessible Route Finder — MCP server
 
-An MCP server that finds accessible (wheelchair/crutches-safe) walking routes inside
-the Salzburg Messe, lets anyone report obstacles (broken elevator, blocked ramp) live,
-and tracks a leaderboard of accessible-route times so people can "race" the obstacle gap
-to zero.
+An MCP server prototype that finds ordinary walking routes inside the Salzburg Messe demo graph, lets users report blocked segments, and records route times. Accessibility is deliberately out of scope for this first running prototype.
 
 ## What's here
 
 - `app/api/mcp/route.ts` — the MCP server (5 tools, see below)
 - `lib/venue.ts` — the venue graph (nodes/edges). **Mocked for the demo** — swap this out
   for validated floorplan-derived routing data when available.
-- `lib/routing.ts` — Dijkstra shortest path, with an accessible-mode filter
+- `lib/routing.ts` — Dijkstra shortest path, using ordinary walking edges only
 - `lib/store.ts` — obstacle state + leaderboard. In-memory by default; set the Upstash
   env vars below to persist across cold starts during the live demo.
 - `app/map` + `app/api/venue-graph` — map page with a prototype venue-floorplan reference
@@ -26,27 +23,23 @@ generation project: hall outlines and labels, rendered as a static SVG at
 
 - The floor-plan image and the route graph are shown separately. The existing route
   graph is still hand-authored and is not spatially aligned to the floor-plan geometry.
-- The source dataset's graph labels every edge as `walk` and `stepFree: true`; it does
-  not encode stairs, lifts, ramps, gradients, or other accessibility constraints in a
-  way we can currently verify. We therefore do not use it to claim a route is accessible.
+- The current route graph is still a hand-authored demo graph and is not spatially aligned with the floor-plan reference. Accessibility has not been assessed and must not be inferred from route results.
 - The supplied source is a single-floor dataset. It is not sufficient for multi-floor
   navigation.
 - Reuse is prototype-only and subject to the venue/data provider's terms. Confirm
   explicit permission for public redistribution and production use before promoting
   this asset beyond the prototype.
 
-Next integration step: connect validated source graph nodes to the floor-plan coordinate
-system, then add independently checked edge attributes (step-free status, stairs, lifts,
-ramps, width/gradient where available) before drawing routes on the real map.
+Next integration step: replace the hand-authored demo graph with the supplied floor-plan walking graph and align its coordinates to the SVG. Once the walking prototype is stable, mark and verify edge attributes for accessibility.
 
 ## Tools exposed
 
 | Tool | Purpose |
 |---|---|
-| `find_accessible_route` | Route between two named points, accessible or fastest, with obstacle-aware rerouting, the accessible-vs-fastest time gap, and a map link |
+| `find_walking_route` | Route between two named points, ordinary walking, with obstacle-aware rerouting, the route time, and a map link |
 | `report_obstacle` | Mark a segment (elevator/ramp/etc.) blocked or clear — rerouting updates immediately |
 | `list_obstacles` | See everything currently reported blocked |
-| `get_leaderboard` | Best recorded accessible-route time for a path |
+| `get_leaderboard` | Best recorded walking-route time for a path |
 | `log_attempt` | Submit a completed time for the leaderboard/"race" mechanic |
 
 ## Run locally
