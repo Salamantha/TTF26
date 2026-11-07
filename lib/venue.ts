@@ -71,23 +71,34 @@ export function findNode(idOrName: string): VenueNode | undefined {
   );
 }
 
-// Resolves an edge from either its exact id ("e12") or a loose human description
-// like "elevator near Halle 5" — good enough for an LLM-driven obstacle report.
+// Resolve only exact IDs or descriptions that identify exactly one edge.
+// Returning undefined for vague/ambiguous descriptions is intentional: obstacle
+// reports must never silently affect an unrelated segment.
 export function findEdge(query: string): VenueEdge | undefined {
   const q = query.trim().toLowerCase();
+  if (!q) return undefined;
+
   const byId = EDGES.find((e) => e.id.toLowerCase() === q);
   if (byId) return byId;
 
   const types: EdgeType[] = ["elevator", "stairs", "ramp", "walk"];
-  const typeHit = types.find((t) => q.includes(t));
+  const typeHit = types.find((type) => q.includes(type));
   const candidates = typeHit ? EDGES.filter((e) => e.type === typeHit) : EDGES;
 
-  const nameOf = (id: NodeId) => NODES.find((n) => n.id === id)?.name.toLowerCase() ?? "";
-  const words = q.split(/\s+/).filter((w) => w.length > 2);
-  const narrowed = candidates.find((e) => {
-    const fromName = nameOf(e.from);
-    const toName = nameOf(e.to);
-    return words.some((w) => fromName.includes(w) || toName.includes(w));
+  const stopWords = new Set(["the", "near", "at", "by", "from", "to", "between", "and", "on", "in", "path", "segment"]);
+  const locationWords = q
+    .split(/[^a-z0-9]+/)
+    .filter((word) => word.length > 1 && !types.includes(word as EdgeType) && !stopWords.has(word));
+
+  // A type-only description is safe only when that type identifies one edge.
+  if (locationWords.length === 0) return candidates.length === 1 ? candidates[0] : undefined;
+
+  const matches = candidates.filter((edge) => {
+    const endpointNames = [edge.from, edge.to]
+      .map((id) => NODES.find((node) => node.id === id)?.name.toLowerCase() ?? "")
+      .join(" ");
+    return locationWords.every((word) => endpointNames.includes(word));
   });
-  return narrowed ?? candidates[0];
+
+  return matches.length === 1 ? matches[0] : undefined;
 }

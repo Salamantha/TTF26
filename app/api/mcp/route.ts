@@ -1,6 +1,6 @@
 import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
-import { NODES, findNode, findEdge } from "@/lib/venue";
+import { NODES, EDGES, findNode, findEdge } from "@/lib/venue";
 import { computeRoute } from "@/lib/routing";
 import { getObstacles, setObstacle, getLeaderboardEntry, submitAttempt } from "@/lib/store";
 
@@ -126,8 +126,16 @@ const handler = createMcpHandler((server) => {
     async ({ location, status, note }) => {
       const edge = findEdge(location);
       if (!edge) {
+        const choices = EDGES.map((candidate) => {
+          const fromName = NODES.find((node) => node.id === candidate.from)?.name ?? candidate.from;
+          const toName = NODES.find((node) => node.id === candidate.to)?.name ?? candidate.to;
+          return `- ${candidate.id}: ${candidate.type} between ${fromName} and ${toName}`;
+        }).join("\n");
         return {
-          content: [{ type: "text", text: `Could not match "${location}" to a known path segment.` }],
+          content: [{
+            type: "text",
+            text: `Could not uniquely identify "${location}". No obstacle was changed. Please specify one exact segment using its ID or endpoint names. Known segments:\n${choices}`,
+          }],
           isError: true,
         };
       }
