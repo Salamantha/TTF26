@@ -1,120 +1,136 @@
-import {
-  EDGES,
-  NODES,
-  NodeId,
-  VenueEdge,
-  AVG_WALK_SPEED_MPS,
-  AVG_WHEELCHAIR_SPEED_MPS,
-} from "./venue";
-import { ObstacleRecord } from "./store";
+// Walking-graph router ported from team-05 (frontend-starter/components/gast/routing.ts),
+// trimmed to A→B routing and extended with a set of blocked nodes for obstacles.
 
-export interface RouteStep {
-  edge: VenueEdge;
-  fromName: string;
-  toName: string;
-  seconds: number;
+export type Pt = [number, number];
+
+export interface GraphNode {
+  id: string;
+  p: Pt;
+  kind: string;
+  target: string | null;
 }
 
 export interface RouteResult {
-  nodeIds: NodeId[];
-  steps: RouteStep[];
-  totalMeters: number;
-  totalSeconds: number;
+  nodeIds: string[];
+  points: Pt[];
+  meters: number;
 }
 
-interface AdjEntry {
-  to: NodeId;
-  edge: VenueEdge;
-  seconds: number;
-}
-
-function buildAdjacency(
-  accessible: boolean,
-  obstacles: Record<string, ObstacleRecord>
-): Map<NodeId, AdjEntry[]> {
-  const speed = accessible ? AVG_WHEELCHAIR_SPEED_MPS : AVG_WALK_SPEED_MPS;
-  const adj = new Map<NodeId, AdjEntry[]>();
-  const addEdge = (from: NodeId, to: NodeId, edge: VenueEdge) => {
-    if (!adj.has(from)) adj.set(from, []);
-    adj.get(from)!.push({ to, edge, seconds: edge.distanceMeters / speed });
-  };
-
-  for (const edge of EDGES) {
-    if (accessible && !edge.wheelchairOk) continue;
-    const obstacle = obstacles[edge.id];
-    if (obstacle?.status === "blocked") continue;
-    // Venue corridors are walkable both directions.
-    addEdge(edge.from, edge.to, edge);
-    addEdge(edge.to, edge.from, edge);
+class Heap {
+  private a: [number, string][] = [];
+  get size() {
+    return this.a.length;
   }
-  return adj;
-}
-
-export function computeRoute(
-  fromId: NodeId,
-  toId: NodeId,
-  accessible: boolean,
-  obstacles: Record<string, ObstacleRecord>
-): RouteResult | null {
-  const adj = buildAdjacency(accessible, obstacles);
-  const dist = new Map<NodeId, number>();
-  const prevEdge = new Map<NodeId, { from: NodeId; edge: VenueEdge }>();
-  const visited = new Set<NodeId>();
-
-  for (const n of NODES) dist.set(n.id, Infinity);
-  dist.set(fromId, 0);
-
-  // Simple O(V^2) Dijkstra — the venue graph is tiny, no need for a heap.
-  while (visited.size < NODES.length) {
-    let current: NodeId | null = null;
-    let currentDist = Infinity;
-    for (const n of NODES) {
-      if (visited.has(n.id)) continue;
-      const d = dist.get(n.id)!;
-      if (d < currentDist) {
-        currentDist = d;
-        current = n.id;
+  push(item: [number, string]) {
+    const a = this.a;
+    a.push(item);
+    let i = a.length - 1;
+    while (i > 0) {
+      const p = (i - 1) >> 1;
+      if (a[p][0] <= a[i][0]) break;
+      [a[p], a[i]] = [a[i], a[p]];
+      i = p;
+    }
+  }
+  pop(): [number, string] {
+    const a = this.a;
+    const top = a[0];
+    const last = a.pop()!;
+    if (a.length) {
+      a[0] = last;
+      let i = 0;
+      for (;;) {
+        const l = 2 * i + 1,
+          r = l + 1;
+        let m = i;
+        if (l < a.length && a[l][0] < a[m][0]) m = l;
+        if (r < a.length && a[r][0] < a[m][0]) m = r;
+        if (m === i) break;
+        [a[m], a[i]] = [a[i], a[m]];
+        i = m;
       }
     }
-    if (current === null) break;
-    visited.add(current);
-    if (current === toId) break;
+    return top;
+  }
+}
 
-    for (const entry of adj.get(current) ?? []) {
-      const alt = currentDist + entry.seconds;
-      if (alt < (dist.get(entry.to) ?? Infinity)) {
-        dist.set(entry.to, alt);
-        prevEdge.set(entry.to, { from: current, edge: entry.edge });
-      }
+export class Router {
+  private adj = new Map<string, [string, number][]>();
+  private pos = new Map<string, Pt>();
+  readonly nodes: GraphNode[];
+
+  constructor(nodes: GraphNode[], edges: [string, string, number][]) {
+    this.nodes = nodes;
+    for (const n of nodes) {
+      this.pos.set(n.id, n.p);
+      this.adj.set(n.id, []);
+    }
+    for (const [a, b, c] of edges) {
+      this.adj.get(a)?.push([b, c]);
+      this.adj.get(b)?.push([a, c]);
     }
   }
 
-  if ((dist.get(toId) ?? Infinity) === Infinity) return null;
-
-  const nodeIds: NodeId[] = [toId];
-  const steps: RouteStep[] = [];
-  let cursor = toId;
-  const nameOf = (id: NodeId) => NODES.find((n) => n.id === id)?.name ?? id;
-  const speed = accessible ? AVG_WHEELCHAIR_SPEED_MPS : AVG_WALK_SPEED_MPS;
-
-  while (cursor !== fromId) {
-    const step = prevEdge.get(cursor);
-    if (!step) break; // shouldn't happen if dist was finite
-    steps.push({
-      edge: step.edge,
-      fromName: nameOf(step.from),
-      toName: nameOf(cursor),
-      seconds: step.edge.distanceMeters / speed,
-    });
-    nodeIds.push(step.from);
-    cursor = step.from;
+  nodePos(id: string) {
+    return this.pos.get(id);
   }
 
-  nodeIds.reverse();
-  steps.reverse();
+  nearestNode(p: Pt): string {
+    let best = "",
+      bd = Infinity;
+    for (const [id, [x, y]] of this.pos) {
+      const d = (x - p[0]) ** 2 + (y - p[1]) ** 2;
+      if (d < bd) {
+        bd = d;
+        best = id;
+      }
+    }
+    return best;
+  }
 
-  const totalMeters = steps.reduce((sum, s) => sum + s.edge.distanceMeters, 0);
-  const totalSeconds = dist.get(toId)!;
+  nodesWithin(p: Pt, radius: number): string[] {
+    const r2 = radius * radius;
+    const out: string[] = [];
+    for (const [id, [x, y]] of this.pos) {
+      if ((x - p[0]) ** 2 + (y - p[1]) ** 2 <= r2) out.push(id);
+    }
+    return out;
+  }
 
-  return { nodeIds, steps, totalMeters, totalSeconds };
+  /** Shortest path from any of `from` to the nearest of `to`, never entering `blocked` nodes. */
+  route(from: string[], to: string[], blocked: Set<string>): RouteResult | null {
+    const targets = new Set(to.filter((t) => !blocked.has(t)));
+    if (!targets.size) return null;
+    const dist = new Map<string, number>();
+    const prev = new Map<string, string>();
+    const h = new Heap();
+    for (const s of from) {
+      if (blocked.has(s)) continue;
+      dist.set(s, 0);
+      h.push([0, s]);
+    }
+    let hit: string | null = null;
+    while (h.size) {
+      const [d, u] = h.pop();
+      if (d > (dist.get(u) ?? Infinity)) continue;
+      if (targets.has(u)) {
+        hit = u;
+        break;
+      }
+      for (const [v, w] of this.adj.get(u) ?? []) {
+        if (blocked.has(v)) continue;
+        const nd = d + w;
+        if (nd < (dist.get(v) ?? Infinity)) {
+          dist.set(v, nd);
+          prev.set(v, u);
+          h.push([nd, v]);
+        }
+      }
+    }
+    if (!hit) return null;
+    const nodeIds: string[] = [];
+    for (let n: string | undefined = hit; n; n = prev.get(n)) nodeIds.push(n);
+    nodeIds.reverse();
+    return { nodeIds, points: nodeIds.map((n) => this.pos.get(n)!), meters: dist.get(hit)! };
+  }
 }

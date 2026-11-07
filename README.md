@@ -1,71 +1,67 @@
 # TTF Accessible Route Finder — MCP server
 
-An MCP server that finds accessible (wheelchair/crutches-aware) walking routes inside
-the Salzburg Messe, compares them against the fastest non-accessible route to surface
-the time gap, lets anyone report obstacles live, and tracks a leaderboard so people can
-"race" that gap toward zero. Route estimates are a hackathon prototype, not a verified
-accessibility survey — see the disclaimer baked into every `find_accessible_route` response.
+An MCP server that plans step-free walking routes inside the Messezentrum Salzburg, shows
+them on a map inside ChatGPT, compares them with the fastest route (stairs allowed) to
+surface the time gap, lets anyone report obstacles live, and keeps a leaderboard so people
+can "race" that gap toward zero. Route estimates are a hackathon prototype, not a verified
+accessibility survey; every `find_accessible_route` response says so.
 
-## What's here
+## Venue data
 
-- `app/api/mcp/route.ts` — the MCP server (5 tools, see below) plus the `ui://widget/route-map.html`
-  resource used by the ChatGPT Apps SDK inline widget
-- `lib/venue.ts` — the venue graph (nodes/edges) with fuzzy name matching (`findNode`/`findEdge`).
-  **Mocked for the demo** — swap this out for validated floorplan-derived routing data when available.
-- `lib/routing.ts` — Dijkstra shortest path, with an accessible-mode filter
-- `lib/store.ts` — obstacle state + leaderboard. In-memory by default; set the Upstash
-  env vars below to persist across cold starts during the live demo.
-- `lib/widget.ts` — the self-contained HTML/JS for the inline ChatGPT widget (reads the
-  whole route+graph from `structuredContent`, no network call from the iframe)
-- `app/map` + `app/api/venue-graph` — a standalone map page (SVG route graph next to the
-  real venue floor-plan reference) for clients that don't render the inline widget
+- **Ground floor (EG):** halls, booths, POIs and the walking graph (2,859 nodes) from the
+  tly wayfinder export that team-05 prepared (`team-05/frontend-starter/public/data/app.json`),
+  trimmed into `data/venue.json`. Regenerate it with
+  `node scripts/import-team05.mjs [path/to/app.json]`.
+- **1. OG of Foyer 10 (TTF Hackathon):** Tagungsräume 4-8, the 18 team tables, WCs, snack
+  zone, and the stairs and lifts, ported from team-05's `levels.ts` (digitised from the
+  organiser's event plan, checked against on-site photos). See `lib/og.ts`.
+- Stairs count as ~20 m of walking, a lift (wait + ride) as ~48 m. The step-free route never
+  uses stairs, which is where the gap comes from. "Lift Mitte" is left out because no photo
+  confirms it; Lift Ost and Treppe Lounge Ost were seen but their positions are estimated.
 
-## Venue floor-plan prototype
+Places the tools understand: halls and foyers, the TTF Hackathon / Tagungsraum 4-8 / Tisch 1-18,
+stairs and lifts by name, exhibitor names, booth codes (e.g. `A-0212`), and categories:
+food (also "ice cream", which routes to the nearest food spot, since there is no ice cream
+stand in the data), coffee, toilet, accessible toilet, info, cloakroom, first aid, ATM,
+tickets, entrance.
 
-The map page now includes a simplified visual extracted from the supplied venue map
-generation project: hall outlines and labels, rendered as a static SVG at
-`public/venue-floorplan-prototype.svg`.
+## Code
 
-**Prototype limitations — do not treat this as live navigation yet:**
+- `app/api/mcp/route.ts` — the MCP server (tools below) and the `ui://widget/route-map-v2.html` widget resource
+- `lib/venue.ts` — data loading, the combined EG + OG graph, place lookup (`findPlace`)
+- `lib/og.ts` — the 1. OG floor and its stairs/lifts
+- `lib/routing.ts` — Dijkstra router (ported from team-05) with blocked nodes for obstacles
+- `lib/plan.ts` — plans a route and its stairs alternative, builds the widget data
+- `lib/widget.ts` — the map widget: static venue plan baked into the HTML, route drawn from the tool result
+- `lib/store.ts` — obstacles + leaderboard (in memory, or Upstash Redis when configured)
+- `app/map/route.ts` — the same widget as a standalone page: `/map?from=entrance&to=TTF%20Hackathon&accessible=true`
 
-- The floor-plan image and the route graph are shown separately — the route graph is
-  still hand-authored and not spatially aligned to the floor-plan geometry.
-- Route times/distances are a hand-authored demo estimate, not a verified accessibility
-  survey (see the disclaimer `find_accessible_route` returns on every call).
-- The supplied source is a single-floor dataset. It is not sufficient for multi-floor
-  navigation.
-- Reuse is prototype-only and subject to the venue/data provider's terms. Confirm
-  explicit permission for public redistribution and production use before promoting
-  this asset beyond the prototype.
-
-Next integration step: replace the hand-authored demo graph with the supplied floor-plan walking graph and align its coordinates to the SVG. Once the walking prototype is stable, mark and verify edge attributes for accessibility.
-
-## Tools exposed
+## Tools
 
 | Tool | Purpose |
 |---|---|
-| `find_accessible_route` | Route between two named points, accessible or fastest, with obstacle-aware rerouting, the accessible-vs-fastest time gap, a map link, and (in ChatGPT) an inline rendered map widget |
-| `report_obstacle` | Mark a segment (elevator/ramp/etc.) blocked or clear — rerouting updates immediately |
-| `list_obstacles` | See everything currently reported blocked |
+| `find_accessible_route` | Route between two places, step-free (default) or fastest, with the stairs-vs-step-free gap and an inline map |
+| `search_places` | Resolve an unclear place name and list close matches |
+| `report_obstacle` | Mark a place blocked (for everyone, or only for wheelchair users, e.g. a broken lift) or clear again |
+| `list_obstacles` | Everything currently reported blocked |
 | `get_leaderboard` | Best recorded accessible-route time for a path |
-| `log_attempt` | Submit a completed time for the leaderboard/"race" mechanic |
+| `log_attempt` | Submit a completed time for the leaderboard |
+
+## Demo script
+
+1. "Find an accessible route from the entrance to the TTF Hackathon" → step-free via Lift West, about 2m 19s; the stairs route via Treppe Nord takes about 1m 20s, a 59 s gap.
+2. "Lift West is out of service" → `report_obstacle` (affects: wheelchair); asking again reroutes via Lift Ost.
+3. "Lift West works again" → cleared.
+4. "Timo made it in 2:30" → `log_attempt` sets the record the next person races.
 
 ## The inline ChatGPT widget
 
-`find_accessible_route`'s tool descriptor sets `_meta["openai/outputTemplate"]` (and the
-MCP-Apps-standard `_meta.ui.resourceUri`) to `ui://widget/route-map.html`, a resource
-registered alongside the tools. In a ChatGPT client that supports the Apps SDK, this
-renders the route directly inside the chat bubble instead of requiring a click-through
-to `/map`. The widget is fully self-contained — the tool's `structuredContent` carries
-the whole venue graph, the obstacle list, and the route, so the sandboxed widget iframe
-never needs to fetch anything.
-
-The exact mechanism ChatGPT uses to deliver tool output to the widget is inconsistently
-documented across sources at the time of writing, so `lib/widget.ts` listens for all of
-them defensively (`window.openai.toolOutput` read directly, the `openai:set_globals`
-event, the raw `ui/notifications/tool-result` postMessage, and a short poll as a last
-resort). If the widget doesn't render in your ChatGPT build, the tool's text response
-still includes a `/map` link as a fallback — the demo doesn't depend on the widget working.
+`find_accessible_route` sets `_meta["openai/outputTemplate"]` and `_meta.ui.resourceUri` to
+`ui://widget/route-map-v2.html`. The tool result's `structuredContent` (about 1.6 KB) carries only
+the route, so nothing is fetched from inside the widget iframe. Because the delivery mechanism
+is documented inconsistently, the widget reads `window.openai.toolOutput`, listens for
+`openai:set_globals` and the `ui/notifications/tool-result` message, and polls briefly. If the
+widget doesn't render, the text answer still includes a `/map` link.
 
 ## Run locally
 
@@ -76,49 +72,26 @@ npm run dev
 # Inspect it:   npm run inspect
 ```
 
-## Deploy to Vercel
+## Deploy
 
-```bash
-npx vercel deploy --prod
-```
+Pushing to `main` deploys on Vercel. Set `APP_BASE_URL=https://<your-domain>` so map links point
+at production (otherwise it falls back to Vercel's production URL).
 
-Then set an env var so the map links the tool returns point at the real deployment
-instead of localhost:
-
-```
-APP_BASE_URL=https://<your-deployment>.vercel.app
-```
-
-(Vercel also sets `VERCEL_URL` automatically, which the server falls back to — but
-setting `APP_BASE_URL` explicitly avoids surprises if you're on a preview URL.)
-
-### Optional: persistent obstacles/leaderboard
-
-Without this, obstacle reports and the leaderboard live in memory and reset on a
-serverless cold start (fine for a quick local demo, risky for a multi-hour hackathon
-booth). Create a free [Upstash Redis](https://upstash.com) database and set:
-
-```
-UPSTASH_REDIS_REST_URL=...
-UPSTASH_REDIS_REST_TOKEN=...
-```
-
-`lib/store.ts` picks these up automatically — no code changes needed.
+For obstacle reports and the leaderboard to survive serverless cold starts, create a free
+[Upstash Redis](https://upstash.com) database and set `UPSTASH_REDIS_REST_URL` and
+`UPSTASH_REDIS_REST_TOKEN`.
 
 ## Connect it to ChatGPT
 
-ChatGPT supports MCP connections through its app/connector workflows. Availability
-and write-action support depend on plan and workspace settings; check the current
-ChatGPT interface and OpenAI documentation before relying on a particular setup.
+Add the connector with your `https://<your-domain>/api/mcp` URL. **After every deploy that
+changes tools, press Refresh on the connector**: ChatGPT caches the tool list and widget
+template when the connection is created, and calls tools that no longer exist (e.g.
+`Tool find_walking_route not found`) until you refresh. Start a new chat afterwards, since old
+chats remember old place names.
 
-Any other MCP-aware client (Claude, Cursor, etc.) works the same way by pointing at
-the same `/api/mcp` URL.
+## Known shortcuts (hackathon scope)
 
-## Known shortcuts (intentional, for hackathon scope)
-
-- The current routing graph is a small hand-authored mock, not real indoor routing data.
-- The supplied floor-plan visual is prototype-only and not yet connected to route geometry.
-- No auth on the MCP endpoint — fine for a controlled demo, but add authentication and
-  appropriate write protections before exposing it to wider use.
-- Confirm dataset attribution, redistribution rights, and production-use terms before
-  any wider release.
+- The 1. OG geometry and the stair/lift costs are estimates.
+- Only the ground floor and the 1. OG of Foyer 10 are mapped.
+- No auth on the MCP endpoint; add authentication before exposing write tools more widely.
+- The venue data comes from the event's wayfinder; confirm the terms before any use beyond the hackathon.

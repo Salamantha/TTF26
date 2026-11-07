@@ -10,7 +10,10 @@ export default function Home() {
         {"<this-deployment-url>"}/api/mcp
       </pre>
       <p>
-        Or view a route directly: <a href="/map?route=entrance_west,foyer,halle1,corridor_north,halle2">example map</a>
+        Or view a route directly:{" "}
+        <a href="/map?from=Eingang%20Foyer%201&to=TTF%20Hackathon">step-free route to the TTF Hackathon</a>
+        {" · "}
+        <a href="/map?from=Eingang%20Foyer%201&to=TTF%20Hackathon&accessible=false">fastest route (stairs)</a>
       </p>
     </main>
   );

@@ -9,10 +9,19 @@
 import { Redis } from "@upstash/redis";
 
 export interface ObstacleRecord {
+  placeId: string;
+  label: string;
+  p: [number, number];
+  nodes: string[];
+  /** "wheelchair" obstacles (broken lift, steps, narrow gap) only affect accessible routing. */
+  affects: "everyone" | "wheelchair";
   status: "blocked" | "clear";
   note?: string;
   reportedAt: string;
 }
+
+// Bumped from "obstacles" when obstacles moved from mock edge ids to real venue places.
+const OBSTACLES_KEY = "obstacles:v2";
 
 export interface LeaderboardRecord {
   bestSeconds: number;
@@ -34,22 +43,22 @@ const redis = redisClient();
 
 export async function getObstacles(): Promise<Record<string, ObstacleRecord>> {
   if (redis) {
-    const keys = await redis.hkeys("obstacles");
+    const keys = await redis.hkeys(OBSTACLES_KEY);
     if (keys.length === 0) return {};
-    const values = await redis.hmget<Record<string, ObstacleRecord>>("obstacles", ...keys);
+    const values = await redis.hmget<Record<string, ObstacleRecord>>(OBSTACLES_KEY, ...keys);
     return values ?? {};
   }
   return Object.fromEntries(memObstacles);
 }
 
-export async function setObstacle(edgeId: string, status: "blocked" | "clear", note?: string) {
-  const record: ObstacleRecord = { status, note, reportedAt: new Date().toISOString() };
+export async function setObstacle(record: Omit<ObstacleRecord, "reportedAt">) {
+  const full: ObstacleRecord = { ...record, reportedAt: new Date().toISOString() };
   if (redis) {
-    await redis.hset("obstacles", { [edgeId]: record });
+    await redis.hset(OBSTACLES_KEY, { [record.placeId]: full });
   } else {
-    memObstacles.set(edgeId, record);
+    memObstacles.set(record.placeId, full);
   }
-  return record;
+  return full;
 }
 
 function routeKey(fromId: string, toId: string) {

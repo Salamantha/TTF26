@@ -1,154 +1,81 @@
 import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
-import { NODES, EDGES, findNode, findEdge } from "@/lib/venue";
-import { computeRoute } from "@/lib/routing";
+import { ROUTER, findPlace, suggestPlaces, EXAMPLE_PLACES } from "@/lib/venue";
+import { planRoute, widgetData, fmtSeconds, ESTIMATE_DISCLAIMER } from "@/lib/plan";
 import { getObstacles, setObstacle, getLeaderboardEntry, submitAttempt } from "@/lib/store";
 import { ROUTE_MAP_WIDGET_URI, ROUTE_MAP_WIDGET_HTML } from "@/lib/widget";
 
 function getBaseUrl() {
   if (process.env.APP_BASE_URL) return process.env.APP_BASE_URL;
+  if (process.env.VERCEL_PROJECT_PRODUCTION_URL) return `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`;
   if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`;
   return "http://localhost:3000";
 }
 
-function fmtSeconds(s: number) {
-  const m = Math.floor(s / 60);
-  const sec = Math.round(s % 60);
-  return `${m}m ${sec}s`;
-}
-
-const ESTIMATE_DISCLAIMER =
-  "Prototype estimate: distances/times come from a hand-authored demo graph, not a verified accessibility survey. Report anything wrong with report_obstacle.";
+const text = (t: string) => ({ type: "text" as const, text: t });
+const OBSTACLE_RADIUS_M = 4;
 
 const handler = createMcpHandler((server) => {
-  server.registerResource(
-    "route-map-widget",
-    ROUTE_MAP_WIDGET_URI,
-    {},
-    async () => ({
-      contents: [
-        {
-          uri: ROUTE_MAP_WIDGET_URI,
-          mimeType: "text/html+skybridge",
-          text: ROUTE_MAP_WIDGET_HTML,
-        },
-      ],
-    })
-  );
+  server.registerResource("route-map-widget", ROUTE_MAP_WIDGET_URI, {}, async () => ({
+    contents: [{ uri: ROUTE_MAP_WIDGET_URI, mimeType: "text/html+skybridge", text: ROUTE_MAP_WIDGET_HTML }],
+  }));
 
   server.registerTool(
     "find_accessible_route",
     {
       title: "Find accessible route",
       description:
-        "Finds a walking route between two points inside the Salzburg Messe (e.g. from an entrance to the TTF venue hall). In accessible mode (default) it avoids stairs and any currently reported obstacles for wheelchair/crutches users, and reports the time gap versus the fastest non-accessible route plus any leaderboard record to beat. This is a hackathon prototype estimate, not a verified accessibility survey.",
+        "Plans a walking route inside the Messezentrum Salzburg and shows it on a map. Places can be halls (Halle 1-10, Foyer 1/10), the TTF Hackathon (Tagungsraum 5-7 on the 1. OG of Foyer 10), its tables (Tisch 1-18) and stage (Tagungsraum 4), stairs/lifts, exhibitors or booth codes, or categories like food, coffee, toilet, accessible toilet, info, entrance. In accessible mode (default) the route is step-free (lifts, no stairs) and avoids reported obstacles; it also reports how much faster the route with stairs would be. Use search_places first if a name is unclear.",
       inputSchema: z.object({
-        from: z.string().describe("Starting point, e.g. 'Westeingang' or 'entrance_west'"),
-        to: z.string().describe("Destination, e.g. 'Halle 2' or 'TTF venue'"),
-        accessible: z
-          .boolean()
-          .default(true)
-          .describe("Whether the route must avoid stairs and other non-wheelchair-accessible edges"),
+        from: z.string().describe("Start, e.g. 'entrance', 'Eingang Foyer 1', 'Halle 2'"),
+        to: z.string().describe("Destination, e.g. 'TTF Hackathon', 'Tisch 12', 'nearest toilet', an exhibitor name"),
+        accessible: z.boolean().default(true).describe("true = step-free (wheelchair, crutches, stroller); false = fastest, stairs allowed"),
       }),
+      annotations: { readOnlyHint: true },
       _meta: {
         ui: { resourceUri: ROUTE_MAP_WIDGET_URI },
         "openai/outputTemplate": ROUTE_MAP_WIDGET_URI,
-        "openai/toolInvocation/invoking": "Finding your route…",
-        "openai/toolInvocation/invoked": "Route found",
+        "openai/toolInvocation/invoking": "Planning your route…",
+        "openai/toolInvocation/invoked": "Route ready",
         "openai/widgetAccessible": true,
       },
     },
     async ({ from, to, accessible }) => {
-      const fromNode = findNode(from);
-      const toNode = findNode(to);
-      if (!fromNode || !toNode) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Could not resolve one of the locations. Known locations: ${NODES.map((n) => n.name).join(", ")}`,
-            },
-          ],
-          isError: true,
-        };
-      }
+      const plan = await planRoute(from, to, accessible);
+      if (!plan.ok) return { content: [text(plan.error)], isError: true };
 
-      const obstacles = await getObstacles();
-      const route = computeRoute(fromNode.id, toNode.id, accessible, obstacles);
-      if (!route) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `No ${accessible ? "accessible " : ""}route found between ${fromNode.name} and ${toNode.name} right now — it may be fully blocked by reported obstacles.`,
-            },
-          ],
-          isError: true,
-        };
-      }
+      const data = widgetData(plan);
+      const mapUrl = `${getBaseUrl()}/map?${new URLSearchParams({ from, to, accessible: String(accessible) })}`;
+      const lines = [
+        `${accessible ? "Step-free" : "Fastest"} route from ${data.fromName} to ${data.toName}: ${data.totalTimeLabel}, ${data.distanceLabel}${data.via.length ? `, via ${data.via.join(", ")}` : ""}.`,
+        ...data.steps.map((s, i) => `${i + 1}. ${s}`),
+        ...data.notes,
+        data.gapLabel,
+        data.raceLabel,
+        ESTIMATE_DISCLAIMER,
+        `Map: ${mapUrl}`,
+      ].filter(Boolean);
+      return { content: [text(lines.join("\n"))], structuredContent: { ...data, mapUrl } };
+    }
+  );
 
-      let gapText: string | undefined;
-      let gapSeconds: number | undefined;
-      let fastest: ReturnType<typeof computeRoute> | null = null;
-      if (accessible) {
-        fastest = computeRoute(fromNode.id, toNode.id, false, obstacles);
-        if (fastest) {
-          gapSeconds = Math.max(0, Math.round(route.totalSeconds - fastest.totalSeconds));
-          gapText = `A non-accessible route would take ${fmtSeconds(fastest.totalSeconds)} — a gap of ${gapSeconds}s. Help close it by keeping obstacle reports up to date.`;
-        }
-      }
-
-      let raceText: string | undefined;
-      let leaderboardEntry: Awaited<ReturnType<typeof getLeaderboardEntry>> = null;
-      if (accessible) {
-        leaderboardEntry = await getLeaderboardEntry(fromNode.id, toNode.id);
-        raceText = leaderboardEntry
-          ? `Current accessible-route record for this path: ${fmtSeconds(leaderboardEntry.bestSeconds)} by ${leaderboardEntry.holder}. Think you can beat it? Log your attempt with log_attempt once you arrive.`
-          : `No accessible-route record set for this path yet — be the first! Log your attempt with log_attempt once you arrive.`;
-      }
-
-      const mapUrl = `${getBaseUrl()}/map?route=${route.nodeIds.join(",")}&accessible=${accessible}`;
-
-      const stepsText = route.steps
-        .map((s) => `- ${s.fromName} → ${s.toName} (${s.edge.type}, ${fmtSeconds(s.seconds)})`)
-        .join("\n");
-
-      return {
-        content: [
-          {
-            type: "text",
-            text:
-              `${accessible ? "Accessible" : "Fastest"} route from ${fromNode.name} to ${toNode.name}: ` +
-              `${fmtSeconds(route.totalSeconds)} over ${Math.round(route.totalMeters)}m.\n\n${stepsText}` +
-              (gapText ? `\n\n${gapText}` : "") +
-              (raceText ? `\n\n${raceText}` : "") +
-              `\n\n${ESTIMATE_DISCLAIMER}` +
-              `\n\nMap: ${mapUrl}`,
-          },
-        ],
-        structuredContent: {
-          from: fromNode.name,
-          to: toNode.name,
-          accessible,
-          totalSeconds: route.totalSeconds,
-          totalMeters: route.totalMeters,
-          nodeIds: route.nodeIds,
-          mapUrl,
-          gapSeconds,
-          leaderboard: leaderboardEntry,
-          disclaimer: ESTIMATE_DISCLAIMER,
-          // widget-ready payload (self-contained — no network call needed in the iframe)
-          nodes: NODES,
-          edges: EDGES,
-          obstacles,
-          routeNodeIds: route.nodeIds,
-          fromName: fromNode.name,
-          toName: toNode.name,
-          totalTimeLabel: fmtSeconds(route.totalSeconds),
-          gapLabel: gapText,
-          raceLabel: raceText,
-        },
-      };
+  server.registerTool(
+    "search_places",
+    {
+      title: "Search venue places",
+      description: "Looks up which venue place a name refers to (halls, TTF Hackathon rooms and tables, stairs/lifts, exhibitors, booth codes, food/toilet/info categories). Use it when a place name in the user's request is unclear.",
+      inputSchema: z.object({ query: z.string() }),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ query }) => {
+      const hit = findPlace(query);
+      const others = suggestPlaces(query).filter((n) => n !== hit?.name);
+      const lines = [
+        hit ? `Best match: ${hit.name}${hit.instances.length > 1 ? ` (${hit.instances.length} locations, the nearest is chosen when routing)` : ""}.` : `No direct match for "${query}".`,
+        others.length ? `Other matches: ${others.join("; ")}.` : "",
+        hit ? "" : `Examples of valid places: ${EXAMPLE_PLACES.join(", ")}.`,
+      ].filter(Boolean);
+      return { content: [text(lines.join("\n"))], structuredContent: { match: hit?.name ?? null, others } };
     }
   );
 
@@ -157,42 +84,32 @@ const handler = createMcpHandler((server) => {
     {
       title: "Report an obstacle",
       description:
-        "Reports that a path segment (e.g. an elevator or ramp) is currently blocked or has been fixed. Updates live routing immediately for everyone using the accessible route finder. Use this to keep information current instead of relying on outdated venue signage.",
+        "Reports that a place is blocked (e.g. 'Lift West out of service', 'boxes blocking the passage at Halle 2') or cleared again. Routing for everyone updates immediately. Use affects='wheelchair' for barriers only wheelchair/crutches users can't pass (broken lift, a step, a narrow gap), 'everyone' for full blockages.",
       inputSchema: z.object({
-        location: z
-          .string()
-          .describe("Which segment, e.g. an edge id like 'e12', or a description like 'elevator near Halle 5'"),
-        status: z.enum(["blocked", "clear"]).describe("Whether the segment is now blocked or has been cleared"),
-        note: z.string().optional().describe("Optional short note, e.g. 'elevator out of service since 14:00'"),
+        location: z.string().describe("A specific place, e.g. 'Lift West', 'Treppe Nord', 'Eingang Foyer 1', 'Halle 2'"),
+        status: z.enum(["blocked", "clear"]),
+        affects: z.enum(["everyone", "wheelchair"]).default("everyone"),
+        note: z.string().optional().describe("Short note, e.g. 'out of service since 14:00'"),
       }),
     },
-    async ({ location, status, note }) => {
-      const edge = findEdge(location);
-      if (!edge) {
-        const choices = EDGES.map((candidate) => {
-          const fromName = NODES.find((node) => node.id === candidate.from)?.name ?? candidate.from;
-          const toName = NODES.find((node) => node.id === candidate.to)?.name ?? candidate.to;
-          return `- ${candidate.id}: ${candidate.type} between ${fromName} and ${toName}`;
-        }).join("\n");
+    async ({ location, status, affects, note }) => {
+      const place = findPlace(location);
+      if (!place) {
+        const s = suggestPlaces(location);
+        return { content: [text(`Couldn't find "${location}". Nothing was changed.${s.length ? ` Did you mean: ${s.join("; ")}?` : ""}`)], isError: true };
+      }
+      if (place.instances.length !== 1) {
         return {
-          content: [{
-            type: "text",
-            text: `Could not uniquely identify "${location}". No obstacle was changed. Please specify one exact segment using its ID or endpoint names. Known segments:\n${choices}`,
-          }],
+          content: [text(`"${location}" matches ${place.instances.length} places (${place.name}). Nothing was changed. Please name the exact one, e.g. ${place.instances.slice(0, 3).map((i) => i.name).join(", ")}.`)],
           isError: true,
         };
       }
-      const record = await setObstacle(edge.id, status, note);
-      const fromName = NODES.find((n) => n.id === edge.from)?.name ?? edge.from;
-      const toName = NODES.find((n) => n.id === edge.to)?.name ?? edge.to;
+      const inst = place.instances[0];
+      const nodes = place.blockNodes ?? [...new Set([...inst.anchors, ...ROUTER.nodesWithin(inst.p, OBSTACLE_RADIUS_M)])];
+      const record = await setObstacle({ placeId: place.id, label: place.name, p: inst.p, nodes, affects, status, note });
       return {
-        content: [
-          {
-            type: "text",
-            text: `Recorded: ${edge.type} between ${fromName} and ${toName} is now ${status}${note ? ` (${note})` : ""}. Routing updated.`,
-          },
-        ],
-        structuredContent: { edgeId: edge.id, ...record },
+        content: [text(`Recorded: ${place.name} is now ${status === "blocked" ? `blocked${affects === "wheelchair" ? " for wheelchair users" : ""}` : "clear"}${note ? ` (${note})` : ""}. Routes update immediately.`)],
+        structuredContent: { placeId: record.placeId, label: record.label, status: record.status, affects: record.affects, reportedAt: record.reportedAt },
       };
     }
   );
@@ -201,24 +118,18 @@ const handler = createMcpHandler((server) => {
     "list_obstacles",
     {
       title: "List current obstacles",
-      description: "Lists all currently reported blocked path segments in the Salzburg Messe.",
+      description: "Lists all currently reported obstacles in the venue.",
       inputSchema: z.object({}),
+      annotations: { readOnlyHint: true },
     },
     async () => {
-      const obstacles = await getObstacles();
-      const blocked = Object.entries(obstacles).filter(([, r]) => r.status === "blocked");
-      if (blocked.length === 0) {
-        return { content: [{ type: "text", text: "No obstacles currently reported. All paths clear." }] };
-      }
-      const text = blocked
-        .map(([edgeId, r]) => {
-          const edge = findEdge(edgeId);
-          const fromName = edge ? NODES.find((n) => n.id === edge.from)?.name : edgeId;
-          const toName = edge ? NODES.find((n) => n.id === edge.to)?.name : "";
-          return `- ${edgeId}: ${fromName} ↔ ${toName}${r.note ? ` — ${r.note}` : ""} (reported ${r.reportedAt})`;
-        })
-        .join("\n");
-      return { content: [{ type: "text", text }], structuredContent: { obstacles } };
+      const blocked = Object.values(await getObstacles()).filter((o) => o.status === "blocked");
+      if (!blocked.length) return { content: [text("No obstacles reported right now.")], structuredContent: { obstacles: [] } };
+      const lines = blocked.map((o) => `- ${o.label}: blocked${o.affects === "wheelchair" ? " for wheelchair users" : ""}${o.note ? ` (${o.note})` : ""}, reported ${o.reportedAt}`);
+      return {
+        content: [text(lines.join("\n"))],
+        structuredContent: { obstacles: blocked.map(({ placeId, label, affects, note, reportedAt }) => ({ placeId, label, affects, note, reportedAt })) },
+      };
     }
   );
 
@@ -226,29 +137,18 @@ const handler = createMcpHandler((server) => {
     "get_leaderboard",
     {
       title: "Get accessible route leaderboard",
-      description: "Gets the fastest recorded accessible-route time between two points, if any.",
-      inputSchema: z.object({
-        from: z.string(),
-        to: z.string(),
-      }),
+      description: "Gets the fastest recorded accessible-route time between two places, if any.",
+      inputSchema: z.object({ from: z.string(), to: z.string() }),
+      annotations: { readOnlyHint: true },
     },
     async ({ from, to }) => {
-      const fromNode = findNode(from);
-      const toNode = findNode(to);
-      if (!fromNode || !toNode) {
-        return { content: [{ type: "text", text: "Could not resolve one of the locations." }], isError: true };
-      }
-      const best = await getLeaderboardEntry(fromNode.id, toNode.id);
+      const a = findPlace(from),
+        b = findPlace(to);
+      if (!a || !b) return { content: [text("Couldn't resolve one of the places. Try search_places.")], isError: true };
+      const best = await getLeaderboardEntry(a.id, b.id);
       return {
-        content: [
-          {
-            type: "text",
-            text: best
-              ? `Record: ${fmtSeconds(best.bestSeconds)} by ${best.holder} (${best.recordedAt})`
-              : "No record set yet for this route.",
-          },
-        ],
-        structuredContent: best ?? null,
+        content: [text(best ? `Record ${a.name} → ${b.name}: ${fmtSeconds(best.bestSeconds)} by ${best.holder} (${best.recordedAt}).` : `No record yet for ${a.name} → ${b.name}.`)],
+        structuredContent: { record: best },
       };
     }
   );
@@ -257,8 +157,7 @@ const handler = createMcpHandler((server) => {
     "log_attempt",
     {
       title: "Log an accessible-route attempt",
-      description:
-        "Submits a completed accessible-route time between two points for the leaderboard/race feature.",
+      description: "Submits a completed accessible-route time between two places for the leaderboard.",
       inputSchema: z.object({
         from: z.string(),
         to: z.string(),
@@ -267,20 +166,17 @@ const handler = createMcpHandler((server) => {
       }),
     },
     async ({ from, to, seconds, holder }) => {
-      const fromNode = findNode(from);
-      const toNode = findNode(to);
-      if (!fromNode || !toNode) {
-        return { content: [{ type: "text", text: "Could not resolve one of the locations." }], isError: true };
-      }
-      const result = await submitAttempt(fromNode.id, toNode.id, seconds, holder);
+      const a = findPlace(from),
+        b = findPlace(to);
+      if (!a || !b) return { content: [text("Couldn't resolve one of the places. Try search_places.")], isError: true };
+      const result = await submitAttempt(a.id, b.id, seconds, holder);
       return {
         content: [
-          {
-            type: "text",
-            text: result.isNewRecord
-              ? `New record! ${holder}: ${fmtSeconds(seconds)} — previous best stands beaten.`
-              : `Not a new record. Best remains ${fmtSeconds(result.best.bestSeconds)} by ${result.best.holder}.`,
-          },
+          text(
+            result.isNewRecord
+              ? `New record for ${a.name} → ${b.name}: ${holder} in ${fmtSeconds(seconds)}!`
+              : `Not a new record. Best is still ${fmtSeconds(result.best.bestSeconds)} by ${result.best.holder}.`
+          ),
         ],
         structuredContent: result,
       };

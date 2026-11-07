@@ -1,137 +1,296 @@
-// Simplified graph of the Salzburg Messe venue for the demo.
-// x/y are plan coordinates (arbitrary units, not geo) used by the SVG map at /map.
-// Swap this out for real floorplan-derived coordinates when available.
+// Salzburg Messe venue: ground floor (EG) plan + walking graph from team-05's tly wayfinder export
+// (data/venue.json, regenerate with scripts/import-team05.mjs) joined with the 1. OG of Foyer 10 (lib/og.ts).
+import raw from "@/data/venue.json";
+import { Router, type GraphNode, type Pt } from "./routing";
+import { buildOg, CONNECTORS } from "./og";
 
-export type NodeId = string;
-
-export interface VenueNode {
-  id: NodeId;
+interface VenueData {
   name: string;
-  x: number;
-  y: number;
+  halls: { name: string | null; poly: Pt[] | null; label: Pt | null }[];
+  spaces: { id: string; kind: string; code: string | null; name: string | null; hall: string | null; poly: Pt[] | null; label: Pt | null }[];
+  pois: { kind: string; name: string | null; p: Pt }[];
+  annotations: { text: string; p: Pt }[];
+  nodes: GraphNode[];
+  edges: [string, string, number][];
+  exhibitors: { id: string; name: string; spaces: string[] }[];
 }
 
-export type EdgeType = "walk" | "elevator" | "stairs" | "ramp";
+export const VENUE = raw as unknown as VenueData;
+export const OG = buildOg();
 
-export interface VenueEdge {
+// Only the EG nodes within this distance of a stair/lift foot get linked to it.
+const CONNECTOR_LINK_RADIUS_M = 15;
+
+function buildRouter() {
+  const eg = new Router(VENUE.nodes, []);
+  const extra: [string, string, number][] = [];
+  for (const k of CONNECTORS) {
+    const n = eg.nearestNode(k.bottom);
+    const p = eg.nodePos(n)!;
+    const d = Math.hypot(p[0] - k.bottom[0], p[1] - k.bottom[1]);
+    if (d <= CONNECTOR_LINK_RADIUS_M) extra.push([n, `${k.id}:b`, Math.round(d * 100) / 100]);
+  }
+  return new Router([...VENUE.nodes, ...OG.nodes], [...VENUE.edges, ...OG.edges, ...extra]);
+}
+
+export const ROUTER = buildRouter();
+
+export const STAIRS_NODES = new Set(
+  CONNECTORS.filter((k) => k.kind === "stairs").flatMap((k) => [`${k.id}:b`, `${k.id}:t`])
+);
+
+export function levelOf(nodeId: string): "eg" | "og" {
+  return nodeId.startsWith("og:") && !nodeId.endsWith(":b") ? "og" : "eg";
+}
+
+export function connectorOf(nodeId: string) {
+  return CONNECTORS.find((k) => nodeId === `${k.id}:b` || nodeId === `${k.id}:t`);
+}
+
+// ---------------------------------------------------------------- places
+
+export interface PlaceInstance {
+  name: string;
+  anchors: string[];
+  p: Pt;
+}
+
+export interface Place {
   id: string;
-  from: NodeId;
-  to: NodeId;
-  distanceMeters: number;
-  type: EdgeType;
-  // Edges that are not usable by a wheelchair/crutches user at all (e.g. a stairs-only shortcut).
-  wheelchairOk: boolean;
+  name: string;
+  instances: PlaceInstance[];
+  /** Nodes an obstacle at this place blocks; defaults to nodes near each instance. */
+  blockNodes?: string[];
+  note?: string;
 }
 
-export const NODES: VenueNode[] = [
-  { id: "entrance_west", name: "Westeingang (West Entrance)", x: 0, y: 200 },
-  { id: "entrance_east", name: "Osteingang (East Entrance)", x: 800, y: 200 },
-  { id: "foyer", name: "Foyer", x: 200, y: 200 },
-  { id: "halle1", name: "Halle 1", x: 350, y: 80 },
-  { id: "halle2", name: "Halle 2 (TTF Venue)", x: 500, y: 80 },
-  { id: "halle3", name: "Halle 3", x: 650, y: 80 },
-  { id: "halle4", name: "Halle 4", x: 350, y: 320 },
-  { id: "halle5", name: "Halle 5", x: 500, y: 320 },
-  { id: "corridor_north", name: "Nordgang", x: 500, y: 150 },
-  { id: "corridor_south", name: "Südgang", x: 500, y: 250 },
-  { id: "stairs_landing", name: "Treppenpodest", x: 420, y: 150 },
+const STOP = new Set([
+  "the", "a", "an", "to", "at", "in", "of", "near", "next", "by", "my", "der", "die", "das", "den", "dem", "zum", "zur",
+  "im", "am", "von", "beim", "bei", "booth", "stand", "stall", "salzburg", "messe", "messezentrum", "please",
+]);
+const SYN: Record<string, string> = {
+  hall: "halle", halls: "halle", hallen: "halle", room: "tagungsraum", raum: "tagungsraum", table: "tisch",
+  elevator: "lift", aufzug: "lift", fahrstuhl: "lift", stairs: "treppe", staircase: "treppe", stair: "treppe",
+  north: "nord", south: "sud", sued: "sud", east: "ost", upstairs: "og", obergeschoss: "og",
+};
 
-  // Event-specific points of interest (exhibitor/food stands etc.) — these don't exist
-  // in base venue geodata and need to be added/updated per event, same spirit as obstacles.
-  { id: "icecream_stand", name: "Eisstand (Ice Cream Stand)", x: 150, y: 260 },
-];
-
-export const EDGES: VenueEdge[] = [
-  { id: "e1", from: "entrance_west", to: "foyer", distanceMeters: 30, type: "walk", wheelchairOk: true },
-  { id: "e2", from: "foyer", to: "halle1", distanceMeters: 40, type: "walk", wheelchairOk: true },
-  { id: "e3", from: "halle1", to: "corridor_north", distanceMeters: 35, type: "walk", wheelchairOk: true },
-  { id: "e4", from: "corridor_north", to: "halle2", distanceMeters: 20, type: "walk", wheelchairOk: true },
-  { id: "e5", from: "halle2", to: "halle3", distanceMeters: 40, type: "walk", wheelchairOk: true },
-  { id: "e6", from: "halle3", to: "entrance_east", distanceMeters: 60, type: "walk", wheelchairOk: true },
-
-  // Fast but inaccessible shortcut: stairs directly from foyer up to the north corridor.
-  { id: "e7", from: "foyer", to: "stairs_landing", distanceMeters: 15, type: "walk", wheelchairOk: true },
-  { id: "e8", from: "stairs_landing", to: "corridor_north", distanceMeters: 10, type: "stairs", wheelchairOk: false },
-
-  // Accessible but normally longer route via elevator through the south corridor.
-  { id: "e9", from: "foyer", to: "halle4", distanceMeters: 55, type: "walk", wheelchairOk: true },
-  { id: "e10", from: "halle4", to: "corridor_south", distanceMeters: 35, type: "walk", wheelchairOk: true },
-  { id: "e11", from: "corridor_south", to: "halle5", distanceMeters: 20, type: "walk", wheelchairOk: true },
-  { id: "e12", from: "halle5", to: "halle2", distanceMeters: 30, type: "elevator", wheelchairOk: true },
-
-  // Ramp alternative between the two corridors, usually slower than the stairs shortcut.
-  { id: "e13", from: "corridor_south", to: "corridor_north", distanceMeters: 50, type: "ramp", wheelchairOk: true },
-
-  { id: "e14", from: "halle4", to: "halle5", distanceMeters: 150, type: "walk", wheelchairOk: true },
-
-  { id: "e15", from: "foyer", to: "icecream_stand", distanceMeters: 25, type: "walk", wheelchairOk: true },
-];
-
-export const AVG_WALK_SPEED_MPS = 1.3; // ~4.7 km/h, roughly average walking pace
-export const AVG_WHEELCHAIR_SPEED_MPS = 1.0; // slightly slower average for a wheelchair/crutches user
-
-function words(s: string): string[] {
+export function normalize(s: string) {
   return s
     .toLowerCase()
-    .split(/[^a-z0-9äöüß]+/)
-    .filter((w) => w.length > 1);
+    .replace(/ä/g, "a")
+    .replace(/ö/g, "o")
+    .replace(/ü/g, "u")
+    .replace(/ß/g, "ss")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
 }
 
-// Resolves a location loosely — e.g. "entrance" or "ice cream food stand" should still
-// find "Westeingang (West Entrance)" / "Eisstand (Ice Cream Stand)" even though the words
-// aren't in the same order or don't form an exact substring. Ties (score equal) keep the
-// first-listed node, which is deliberate: a bare "entrance" resolves to the main west one.
-export function findNode(idOrName: string): VenueNode | undefined {
-  const q = idOrName.trim().toLowerCase();
-  if (!q) return undefined;
+function tokens(s: string) {
+  return normalize(s)
+    .split(" ")
+    .filter((t) => t && !STOP.has(t))
+    .map((t) => SYN[t] ?? t);
+}
 
-  const exact = NODES.find((n) => n.id.toLowerCase() === q || n.name.toLowerCase() === q);
-  if (exact) return exact;
+const isNum = (t: string) => /^\d/.test(t);
 
-  const queryWords = words(q);
-  if (queryWords.length === 0) return undefined;
+function score(q: string[], name: string): number {
+  const n = tokens(name);
+  if (!n.length || !q.length) return 0;
+  const qs = new Set(q),
+    ns = new Set(n);
+  const qNums = q.filter(isNum),
+    nNums = n.filter(isNum);
+  if (qNums.some((t) => !ns.has(t))) return 0;
+  if (nNums.length && !qNums.length) return 0;
+  const shared = [...qs].filter((t) => ns.has(t));
+  const overlap = shared.length;
+  if (!shared.some((t) => !isNum(t))) return 0;
+  return (overlap / qs.size) * 0.6 + (overlap / ns.size) * 0.4;
+}
 
-  let best: VenueNode | undefined;
-  let bestScore = 0;
-  for (const n of NODES) {
-    const nameWords = new Set(words(n.name));
-    const score = queryWords.filter((w) => nameWords.has(w)).length;
-    if (score > bestScore) {
-      bestScore = score;
-      best = n;
+const anchorAt = (p: Pt) => [ROUTER.nearestNode(p)];
+
+function spaceAnchors(spaceId: string, label: Pt | null): string[] {
+  const doors = VENUE.nodes.filter((n) => n.target === spaceId).map((n) => n.id);
+  if (doors.length) return doors;
+  return label ? anchorAt(label) : [];
+}
+
+interface NamedPlace extends Place {
+  names: string[];
+}
+
+function buildNamedPlaces(): NamedPlace[] {
+  const out: NamedPlace[] = [];
+  for (const p of OG.places) {
+    const k = CONNECTORS.find((c) => c.id === p.id);
+    out.push({
+      id: p.id,
+      name: k ? `${k.name} (${k.kind === "lift" ? "lift" : "stairs"} to 1. OG)` : p.name,
+      names: [p.name, ...p.aliases],
+      instances: [{ name: p.name, anchors: [p.node], p: p.p }],
+      blockNodes: k ? [`${k.id}:b`, `${k.id}:t`] : undefined,
+      note: k?.approx ? `${k.name}'s exact position is estimated (mirrored from the west side).` : undefined,
+    });
+  }
+  for (const h of VENUE.halls) {
+    if (!h.name || !h.label) continue;
+    out.push({ id: `hall:${normalize(h.name)}`, name: h.name, names: [h.name], instances: [{ name: h.name, anchors: anchorAt(h.label), p: h.label }] });
+  }
+  for (const a of VENUE.annotations) {
+    if (a.text === "Eingang" || out.some((o) => o.names.includes(a.text))) continue;
+    out.push({ id: `spot:${normalize(a.text)}`, name: a.text, names: [a.text], instances: [{ name: a.text, anchors: anchorAt(a.p), p: a.p }] });
+  }
+  for (const s of VENUE.spaces) {
+    if (!s.name || s.kind === "booth" || !s.label) continue;
+    out.push({ id: `space:${s.id}`, name: s.hall ? `${s.name} (${s.hall})` : s.name, names: [s.name], instances: [{ name: s.name, anchors: spaceAnchors(s.id, s.label), p: s.label }] });
+  }
+  const spaceById = new Map(VENUE.spaces.map((s) => [s.id, s]));
+  for (const e of VENUE.exhibitors) {
+    const instances = e.spaces
+      .map((id) => spaceById.get(id))
+      .filter((s): s is NonNullable<typeof s> => !!s?.label)
+      .map((s) => ({ name: `${e.name} (Stand ${s.code ?? "?"}${s.hall ? `, ${s.hall}` : ""})`, anchors: spaceAnchors(s.id, s.label), p: s.label! }));
+    if (instances.length) out.push({ id: `exhibitor:${e.id}`, name: instances[0].name, names: [e.name], instances });
+  }
+  return out;
+}
+
+const NAMED = buildNamedPlaces();
+const BOOTHS_BY_CODE = new Map(
+  VENUE.spaces.filter((s) => s.code && s.label).map((s) => [normalize(s.code!).replace(/ /g, ""), s])
+);
+
+const egPois = (kinds: string[], label: string): PlaceInstance[] =>
+  VENUE.pois.filter((p) => kinds.includes(p.kind)).map((p) => ({ name: p.name ?? label, anchors: anchorAt(p.p), p: p.p }));
+const ogPois = (cat: string): PlaceInstance[] =>
+  OG.places.filter((p) => p.category === cat).map((p) => ({ name: p.name, anchors: [p.node], p: p.p }));
+
+interface Category {
+  id: string;
+  name: string;
+  words: string[];
+  instances: () => PlaceInstance[];
+  note?: (q: string) => string | undefined;
+}
+
+const has = (q: string, words: string[]) => words.some((w) => ` ${q} `.includes(` ${w} `));
+const TOILET = ["wc", "toilet", "toilets", "toilette", "toiletten", "restroom", "restrooms", "bathroom", "klo"];
+const ACCESSIBLE = ["accessible", "barrierefrei", "disabled", "wheelchair", "rollstuhl", "behinderten"];
+const ENTRANCE_FOYERS = ["Foyer 10", "Foyer 1"];
+
+function entranceInstances(): PlaceInstance[] {
+  const all = VENUE.nodes.filter((n) => n.kind === "entrance");
+  const out: PlaceInstance[] = [];
+  for (const name of ENTRANCE_FOYERS) {
+    const hall = VENUE.halls.find((h) => h.name === name);
+    if (!hall?.label) continue;
+    let best = all[0],
+      bd = Infinity;
+    for (const n of all) {
+      const d = Math.hypot(n.p[0] - hall.label[0], n.p[1] - hall.label[1]);
+      if (d < bd) {
+        bd = d;
+        best = n;
+      }
+    }
+    out.push({ name: `Eingang ${name}`, anchors: [best.id], p: best.p });
+  }
+  return out;
+}
+
+const CATEGORIES: Category[] = [
+  { id: "cat:wc-accessible", name: "nearest accessible toilet", words: [], instances: () => [...egPois(["wc_accessible"], "WC barrierefrei"), ...ogPois("wc_accessible")] },
+  { id: "cat:wc", name: "nearest toilet", words: TOILET, instances: () => [...egPois(["wc", "wc_women", "wc_men", "wc_accessible"], "WC"), ...ogPois("wc"), ...ogPois("wc_accessible")] },
+  {
+    id: "cat:food",
+    name: "nearest food stand",
+    words: ["food", "essen", "imbiss", "snack", "snacks", "eis", "eisstand", "icecream", "ice cream", "gelato", "restaurant", "bistro", "lunch", "mittagessen", "hungry", "burger", "pizza", "eat"],
+    instances: () => [
+      ...egPois(["food"], "Food"),
+      ...VENUE.annotations.filter((a) => /bistro/i.test(a.text)).map((a) => ({ name: a.text, anchors: anchorAt(a.p), p: a.p })),
+      ...ogPois("food"),
+    ],
+    note: (q) =>
+      has(q, ["eis", "eisstand", "icecream", "gelato"]) || q.includes("ice cream")
+        ? "The venue data has no dedicated ice cream stand, so this routes to the nearest food spot."
+        : undefined,
+  },
+  { id: "cat:cafe", name: "nearest café", words: ["cafe", "kaffee", "coffee", "espresso", "cappuccino"], instances: () => egPois(["cafe"], "Café") },
+  { id: "cat:info", name: "nearest info point", words: ["info", "information", "infopoint", "infostand", "help"], instances: () => egPois(["info"], "Info") },
+  { id: "cat:cloakroom", name: "nearest cloakroom", words: ["garderobe", "cloakroom", "coat", "coats", "wardrobe"], instances: () => egPois(["cloakroom"], "Garderobe") },
+  { id: "cat:first-aid", name: "first aid", words: ["first aid", "erste hilfe", "sanitater", "sanitaeter", "medical", "doctor", "arzt"], instances: () => egPois(["first_aid"], "Erste Hilfe") },
+  { id: "cat:atm", name: "nearest ATM", words: ["atm", "bankomat", "geldautomat", "cash"], instances: () => egPois(["atm"], "Bankomat") },
+  { id: "cat:ticket", name: "nearest ticket office", words: ["ticket", "tickets", "kasse", "ticket office"], instances: () => egPois(["ticket_office"], "Kasse") },
+  { id: "cat:entrance", name: "entrance", words: ["entrance", "eingang", "entry", "haupteingang", "main entrance", "entrances"], instances: entranceInstances },
+];
+
+export function findPlace(query: string): Place | null {
+  const q = normalize(query);
+  if (!q) return null;
+  const qt = tokens(query);
+
+  const code = q.replace(/ /g, "");
+  const booth = BOOTHS_BY_CODE.get(code);
+  if (booth) {
+    return { id: `space:${booth.id}`, name: `Stand ${booth.code}${booth.hall ? ` (${booth.hall})` : ""}`, instances: [{ name: `Stand ${booth.code}`, anchors: spaceAnchors(booth.id, booth.label), p: booth.label! }] };
+  }
+
+  let best: NamedPlace | null = null,
+    bs = 0;
+  for (const p of NAMED) {
+    for (const n of p.names) {
+      const s = score(qt, n);
+      if (s > bs) {
+        bs = s;
+        best = p;
+      }
     }
   }
-  return best;
+  // A strong name hit ("Halle 2", "Lift West", an exhibitor) wins over a generic word like "toilet".
+  if (best && bs >= 0.85) return best;
+
+  if (has(q, TOILET) && has(q, ACCESSIBLE)) return categoryPlace(CATEGORIES[0], q);
+  for (const cat of CATEGORIES.slice(1)) {
+    if (has(q, cat.words) || cat.words.some((w) => w.includes(" ") && q.includes(w))) {
+      if (cat.id === "cat:entrance" && qt.some(isNum)) {
+        const specific = cat.instances().find((i) => score(qt, i.name.replace("Eingang ", "")) > 0);
+        if (specific) return { id: `entrance:${normalize(specific.name)}`, name: specific.name, instances: [specific] };
+      }
+      return categoryPlace(cat, q);
+    }
+  }
+  return best && bs >= 0.5 ? best : null;
 }
 
-// Resolve only exact IDs or descriptions that identify exactly one edge.
-// Returning undefined for vague/ambiguous descriptions is intentional: obstacle
-// reports must never silently affect an unrelated segment.
-export function findEdge(query: string): VenueEdge | undefined {
-  const q = query.trim().toLowerCase();
-  if (!q) return undefined;
-
-  const byId = EDGES.find((e) => e.id.toLowerCase() === q);
-  if (byId) return byId;
-
-  const types: EdgeType[] = ["elevator", "stairs", "ramp", "walk"];
-  const typeHit = types.find((type) => q.includes(type));
-  const candidates = typeHit ? EDGES.filter((e) => e.type === typeHit) : EDGES;
-
-  const stopWords = new Set(["the", "near", "at", "by", "from", "to", "between", "and", "on", "in", "path", "segment"]);
-  const locationWords = q
-    .split(/[^a-z0-9]+/)
-    .filter((word) => word.length > 1 && !types.includes(word as EdgeType) && !stopWords.has(word));
-
-  // A type-only description is safe only when that type identifies one edge.
-  if (locationWords.length === 0) return candidates.length === 1 ? candidates[0] : undefined;
-
-  const matches = candidates.filter((edge) => {
-    const endpointNames = [edge.from, edge.to]
-      .map((id) => NODES.find((node) => node.id === id)?.name.toLowerCase() ?? "")
-      .join(" ");
-    return locationWords.every((word) => endpointNames.includes(word));
-  });
-
-  return matches.length === 1 ? matches[0] : undefined;
+function categoryPlace(cat: Category, q: string): Place {
+  return { id: cat.id, name: cat.name, instances: cat.instances(), note: cat.note?.(q) };
 }
+
+export function placeById(id: string): Place | null {
+  return NAMED.find((p) => p.id === id) ?? null;
+}
+
+/** Up to `n` place names that partially match, for "did you mean" answers. */
+export function suggestPlaces(query: string, n = 8): string[] {
+  const qt = tokens(query);
+  return NAMED.map((p) => ({ p, s: Math.max(...p.names.map((name) => score(qt, name))) }))
+    .filter((x) => x.s > 0)
+    .sort((a, b) => b.s - a.s)
+    .slice(0, n)
+    .map((x) => x.p.name);
+}
+
+export const EXAMPLE_PLACES = [
+  "Eingang Foyer 1",
+  "Eingang Foyer 10",
+  "TTF Hackathon (Tagungsraum 5-7, 1. OG)",
+  "Tagungsraum 4 / Bühne",
+  "Tisch 1-18",
+  "Halle 1-10",
+  "Lift West",
+  "Treppe Nord",
+  "food / coffee / toilet / accessible toilet / info",
+  "an exhibitor name or booth code like A-0212",
+];
