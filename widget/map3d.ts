@@ -6,6 +6,7 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { CSS2DObject, CSS2DRenderer } from "three/examples/jsm/renderers/CSS2DRenderer.js";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
+import { densityAt, densityColour, simTime, DENSITY_LEGEND, type Hotspot } from "../lib/crowd";
 
 type Pt = [number, number];
 
@@ -13,6 +14,7 @@ interface Venue {
   halls: { name: string | null; poly: Pt[]; label: Pt | null; h: number }[];
   booths: { id: string; poly: Pt[]; code: string | null; kind: string; color: string | null; label: Pt | null; ex: string }[];
   blocks: Pt[][];
+  hotspots: Hotspot[];
   og: {
     elevation: number;
     roomH: number;
@@ -23,16 +25,28 @@ interface Venue {
   };
 }
 
+type Mobility = "walk" | "cane" | "wheelchair";
+
 interface RouteData {
-  accessible: boolean;
+  query: { from: string; to: string };
+  mobility: Mobility;
+  mobilityLabel: string;
+  avoidCrowds: boolean;
   fromName: string;
   toName: string;
-  totalTimeLabel: string;
+  seconds: number;
+  timeLabel: string;
   distanceLabel: string;
   via: string[];
   steps: string[];
-  gapLabel?: string;
-  raceLabel?: string;
+  compare: {
+    fastest: { seconds: number; label: string; via: string[] } | null;
+    stepFree: { seconds: number; label: string; via: string[] } | null;
+    gapSeconds: number | null;
+  };
+  leaderboard: { holder: string; seconds: number; label: string; recordedAt: string }[];
+  persistent: boolean;
+  checks: { name: string; kind: "stairs" | "lift"; placeId: string; confirmedAt: string | null; approx: boolean }[];
   notes: string[];
   disclaimer: string;
   segments: { level: "eg" | "og"; points: Pt[] }[];
@@ -53,10 +67,29 @@ interface RouteData {
   otherStands: string[];
 }
 
+interface ToolResult {
+  content?: { type: string; text?: string }[];
+  structuredContent?: unknown;
+  isError?: boolean;
+}
+
+interface WidgetState {
+  race?: { key: string; startedAt: number } | null;
+  name?: string;
+  heat?: boolean;
+}
+
 declare global {
   interface Window {
     __TTF_VENUE__: Venue;
-    openai?: { toolOutput?: RouteData; theme?: string; requestDisplayMode?: (o: { mode: string }) => Promise<unknown> };
+    openai?: {
+      toolOutput?: RouteData;
+      theme?: string;
+      widgetState?: WidgetState | null;
+      setWidgetState?: (s: WidgetState) => Promise<void> | void;
+      callTool?: (name: string, args: Record<string, unknown>) => Promise<ToolResult>;
+      requestDisplayMode?: (o: { mode: string }) => Promise<unknown>;
+    };
   }
 }
 
@@ -328,6 +361,84 @@ function start() {
   }
   label("1. OG Foyer 10 · TTF Hackathon", centroid(og.outline), OG_Y + og.roomH + 1.5, "hall", null);
 
+  // Simulated visitor density as heat textures on both floors (same simulation and clock the server routes with).
+  const CELL = 1.5;
+  const heatLayers = [
+    { level: 0, y: 0.09, polys: venue.halls.map((h) => h.poly) },
+    { level: 1, y: OG_Y + 0.03, polys: [og.outline, ...og.areas.filter((a) => a.kind === "lobby").map((a) => a.poly)] },
+  ].map(({ level, y, polys }) => {
+    let x0 = Infinity,
+      y0 = Infinity,
+      x1 = -Infinity,
+      y1 = -Infinity;
+    for (const p of polys) for (const [x, z] of p) {
+      x0 = Math.min(x0, x);
+      y0 = Math.min(y0, z);
+      x1 = Math.max(x1, x);
+      y1 = Math.max(y1, z);
+    }
+    const W = Math.ceil((x1 - x0) / CELL),
+      H = Math.ceil((y1 - y0) / CELL);
+    const maskCanvas = document.createElement("canvas");
+    maskCanvas.width = W;
+    maskCanvas.height = H;
+    const mctx = maskCanvas.getContext("2d")!;
+    mctx.fillStyle = "#fff";
+    for (const p of polys) {
+      mctx.beginPath();
+      p.forEach(([x, z], i) => (i ? mctx.lineTo((x - x0) / CELL, (z - y0) / CELL) : mctx.moveTo((x - x0) / CELL, (z - y0) / CELL)));
+      mctx.closePath();
+      mctx.fill();
+    }
+    const mask = mctx.getImageData(0, 0, W, H).data;
+    const canvas = document.createElement("canvas");
+    canvas.width = W;
+    canvas.height = H;
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const mesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(W * CELL, H * CELL).rotateX(-Math.PI / 2),
+      new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false })
+    );
+    mesh.position.set(x0 + (W * CELL) / 2, y, y0 + (H * CELL) / 2);
+    mesh.renderOrder = 1;
+    scene.add(mesh);
+    return { level, x0, y0, W, H, mask, canvas, tex, mesh };
+  });
+  const paintHeat = () => {
+    const t = simTime();
+    for (const l of heatLayers) {
+      const ctx = l.canvas.getContext("2d")!;
+      const img = ctx.createImageData(l.W, l.H);
+      for (let j = 0; j < l.H; j++)
+        for (let i = 0; i < l.W; i++) {
+          const k = (j * l.W + i) * 4;
+          if (!l.mask[k + 3]) continue;
+          const [r, g, b, a] = densityColour(densityAt(venue.hotspots, [l.x0 + (i + 0.5) * CELL, l.y0 + (j + 0.5) * CELL], l.level, t));
+          img.data[k] = r;
+          img.data[k + 1] = g;
+          img.data[k + 2] = b;
+          img.data[k + 3] = Math.round(a * 255);
+        }
+      ctx.putImageData(img, 0, 0);
+      l.tex.needsUpdate = true;
+    }
+  };
+  let heatOn = false;
+  let heatTimer: ReturnType<typeof setInterval> | null = null;
+  const setHeat = (on: boolean) => {
+    heatOn = on;
+    for (const l of heatLayers) l.mesh.visible = on;
+    if (heatTimer) clearInterval(heatTimer);
+    heatTimer = null;
+    if (on) {
+      paintHeat();
+      heatTimer = setInterval(paintHeat, 2000);
+    }
+    document.getElementById("ttf-heat")!.setAttribute("aria-pressed", String(on));
+    document.getElementById("ttf-heat-legend")!.hidden = !on;
+  };
+
   // Route layer, rebuilt for every tool result.
   const routeGroup = new THREE.Group();
   scene.add(routeGroup);
@@ -496,48 +607,355 @@ function start() {
   };
   requestAnimationFrame(loop);
 
-  document.getElementById("ttf-reset")!.onclick = () => frame(true);
-  document.getElementById("ttf-top")!.onclick = () => frame(true, true);
-  const full = document.getElementById("ttf-full")!;
+  const $ = (id: string) => document.getElementById(id)!;
+  $("ttf-reset").onclick = () => frame(true);
+  $("ttf-top").onclick = () => frame(true, true);
+  const full = $("ttf-full");
   if (window.openai?.requestDisplayMode) full.onclick = () => window.openai!.requestDisplayMode!({ mode: "fullscreen" });
   else full.hidden = true;
 
-  // Text panel.
-  function renderPanel(d: RouteData) {
-    document.getElementById("ttf-title")!.textContent = `${d.accessible ? "Step-free route" : "Fastest route"}: ${d.fromName} → ${d.toName}`;
-    document.getElementById("ttf-sub")!.textContent =
-      `${d.totalTimeLabel} · ${d.distanceLabel}${d.via.length ? ` · via ${d.via.join(", ")}` : ""}`;
-    const card = document.getElementById("ttf-stand")!;
-    card.replaceChildren();
-    card.hidden = !d.stand;
-    if (d.stand) {
-      const s = d.stand;
-      el("div", "stand-name", s.exhibitor ?? "Stand", card);
-      el("div", "stand-meta", [s.code && `Stand ${s.code}`, s.hall].filter(Boolean).join(" · "), card);
-      if (s.categories.length) el("div", "stand-cats", s.categories.join(" · "), card);
-      if (s.whyVisit) el("p", "stand-why", s.whyVisit, card);
-      if (s.alsoHere.length) el("div", "stand-meta", `Also at this stand: ${s.alsoHere.join(", ")}`, card);
-      if (s.website) {
-        const a = el("a", "stand-link", s.website.replace(/^https?:\/\//, "").replace(/\/$/, ""), card);
-        a.href = s.website;
-        a.target = "_blank";
-        a.rel = "noopener noreferrer";
-      }
-      if (d.otherStands.length) el("div", "stand-meta", `Other stands like this: ${d.otherStands.join("; ")}`, card);
+  // Widget state survives re-renders inside ChatGPT; localStorage covers the plain /map page.
+  const loadState = (): WidgetState => {
+    const s = window.openai?.widgetState;
+    if (s) return { ...s };
+    try {
+      return JSON.parse(localStorage.getItem("ttf-widget") || "{}");
+    } catch {
+      return {};
     }
-    const ol = document.getElementById("ttf-steps")!;
-    ol.replaceChildren(...d.steps.map((s) => el("li", "", s)));
-    const foot = document.getElementById("ttf-foot")!;
-    foot.replaceChildren(...[...d.notes, d.gapLabel, d.raceLabel, d.disclaimer].filter(Boolean).map((s) => el("p", "", s!)));
-    document.getElementById("ttf-legend-fast")!.hidden = !d.fastestSegments;
+  };
+  let state = loadState();
+  const saveState = (patch: Partial<WidgetState>) => {
+    state = { ...state, ...patch };
+    try {
+      window.openai?.setWidgetState?.(state);
+    } catch {}
+    try {
+      localStorage.setItem("ttf-widget", JSON.stringify(state));
+    } catch {}
+  };
+
+  const toastEl = $("ttf-toast");
+  let toastTimer: ReturnType<typeof setTimeout> | undefined;
+  const toast = (msg: string) => {
+    toastEl.textContent = msg;
+    toastEl.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => (toastEl.hidden = true), 6000);
+  };
+
+  const legend = $("ttf-heat-legend");
+  for (const l of DENSITY_LEGEND) {
+    const s = el("span", "", undefined, legend);
+    el("i", "", undefined, s).style.background = l.css;
+    s.append(l.label);
   }
+  el("span", "unit", "people/m² · simulated", legend);
+  setHeat(state.heat ?? new URLSearchParams(location.search).has("heat"));
+  $("ttf-heat").onclick = () => {
+    setHeat(!heatOn);
+    saveState({ heat: heatOn });
+  };
+
+  const canCall = !!window.openai?.callTool;
+  const call = async (name: string, args: Record<string, unknown>) => {
+    const r = await window.openai!.callTool!(name, args);
+    const msg = r?.content?.find((c) => c.type === "text")?.text ?? "";
+    if (r?.isError) throw new Error(msg || "Something went wrong.");
+    return { msg, data: r?.structuredContent };
+  };
 
   let last: RouteData | null = null;
-  const show = (d: RouteData | null | undefined) => {
-    if (!d || !d.segments || d === last) return;
+  let busy = false;
+  const replan = async (patch: { mobility?: Mobility; avoidCrowds?: boolean }) => {
+    if (!last || busy || !canCall) return;
+    busy = true;
+    root.classList.add("busy");
+    try {
+      const { data } = await call("find_accessible_route", {
+        from: last.query.from,
+        to: last.query.to,
+        mobility: patch.mobility ?? last.mobility,
+        avoidCrowds: patch.avoidCrowds ?? last.avoidCrowds,
+      });
+      show(data as RouteData, true);
+    } catch (e) {
+      toast((e as Error).message);
+    } finally {
+      busy = false;
+      root.classList.remove("busy");
+    }
+  };
+
+  // Mobility profiles (Material Icons, Apache 2.0: directions_walk, elderly, accessible), as in team-05.
+  const ICON: Record<Mobility, string> = {
+    walk: "M13.5 5.5c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zM9.8 8.9L7 23h2.1l1.8-8 2.1 2v6h2v-7.5l-2.1-2 .6-3C14.8 12 16.8 13 19 13v-2c-1.9 0-3.5-1-4.3-2.4l-1-1.6c-.4-.6-1-1-1.7-1-.3 0-.5.1-.8.1L6 8.3V13h2V9.6l1.8-.7",
+    cane: "M13.5 5.5c1.09 0 2-.9 2-2s-.91-2-2-2-2 .9-2 2 .9 2 2 2zM20 12.5V23h-1V12.5c0-.28-.22-.5-.5-.5s-.5.22-.5.5v1h-1v-.69c-1.46-.38-2.7-1.29-3.51-2.52-.31.87-.49 1.78-.49 2.71 0 .23.02.46.03.69L15 16.5V23h-2v-5l-1.78-2.54L11 19l-3 4-1.6-1.2L9 18.33V13c0-1.15.18-2.29.5-3.39l-1.5.85V14H6V9.3l5.4-3.07v.01c.59-.31 1.32-.33 1.94.03.36.21.63.51.8.85l.79 1.67C15.58 10.1 16.94 11 18.5 11c.83 0 1.5.67 1.5 1.5z",
+    wheelchair: "M12 4c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm7 7V9c-1.54.02-3.09-.75-4.07-1.83l-1.29-1.43c-.17-.19-.38-.34-.61-.45-.01 0-.01-.01-.02-.01H13c-.35-.2-.75-.3-1.19-.26C10.76 5.11 10 6.04 10 7.09V13c0 1.1.9 2 2 2h5v5h2v-5.5c0-1.1-.9-2-2-2h-3v-3.45c1.29 1.07 3.25 1.94 5 1.95zm-6.17 5c-.41 1.16-1.52 2-2.83 2-1.66 0-3-1.34-3-3 0-1.31.84-2.41 2-2.83V12.1c-2.28.46-4 2.48-4 4.9 0 2.76 2.24 5 5 5 2.42 0 4.44-1.72 4.9-4h-2.07z",
+  };
+  const PROFILE_LABEL: Record<Mobility, string> = { walk: "Walking", cane: "Cane / crutches", wheelchair: "Wheelchair" };
+  const prof = $("ttf-profile");
+  for (const m of ["walk", "cane", "wheelchair"] as Mobility[]) {
+    const b = el("button", "", undefined, prof);
+    b.type = "button";
+    b.dataset.m = m;
+    b.title = PROFILE_LABEL[m];
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("aria-hidden", "true");
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", ICON[m]);
+    svg.appendChild(path);
+    b.append(svg, el("span", "", PROFILE_LABEL[m]));
+    b.disabled = !canCall;
+    b.onclick = () => replan({ mobility: m });
+  }
+  const avoid = $("ttf-avoid") as HTMLInputElement;
+  avoid.disabled = !canCall;
+  avoid.onchange = () => replan({ avoidCrowds: avoid.checked });
+
+  const ago = (iso: string) => {
+    const s = (Date.now() - Date.parse(iso)) / 1000;
+    if (s < 60) return "just now";
+    if (s < 3600) return `${Math.round(s / 60)} min ago`;
+    if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+    return `${Math.round(s / 86400)} days ago`;
+  };
+  const clock = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+
+  function renderHeader(d: RouteData) {
+    $("ttf-title").textContent = `${d.fromName} → ${d.toName}`;
+    $("ttf-sub").textContent = `${d.mobilityLabel} · ${d.timeLabel} · ${d.distanceLabel}${d.via.length ? ` · via ${d.via.join(", ")}` : ""}`;
+    prof.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.m === d.mobility)));
+    avoid.checked = d.avoidCrowds;
+  }
+
+  function renderCompare(d: RouteData) {
+    const card = $("ttf-compare");
+    card.replaceChildren();
+    const { fastest, stepFree, gapSeconds } = d.compare;
+    el("div", "card-title", "Fastest vs step-free (same walking pace)", card);
+    const max = Math.max(fastest?.seconds ?? 0, stepFree?.seconds ?? 0, 1);
+    const row = (label: string, r: RouteData["compare"]["fastest"], cls: string) => {
+      const line = el("div", "cmp-row", undefined, card);
+      el("span", "cmp-label", label, line);
+      const bar = el("span", "cmp-bar", undefined, line);
+      el("i", cls, undefined, bar).style.width = `${r ? (r.seconds / max) * 100 : 0}%`;
+      el("span", "cmp-time", r ? r.label : "no route", line);
+      el("span", "cmp-via", r ? (r.via.length ? `via ${r.via.join(", ")}` : "no floor change") : "", line);
+    };
+    row("Fastest", fastest, "fast");
+    row("Step-free", stepFree, "free");
+    el(
+      "div",
+      gapSeconds ? "gap" : "gap zero",
+      gapSeconds
+        ? `Step-free detour: +${gapSeconds} s. Confirming lifts and reporting obstacles brings it toward zero.`
+        : "No detour: step-free visitors are as fast as everyone else here.",
+      card
+    );
+    for (const c of d.checks) {
+      el(
+        "div",
+        c.confirmedAt ? "check ok" : "check",
+        `${c.name}: ${c.confirmedAt ? `confirmed working ${ago(c.confirmedAt)}` : "not confirmed yet"}${c.approx ? " · position estimated" : ""}`,
+        card
+      );
+    }
+  }
+
+  const raceKey = (d: RouteData) => `${d.query.from}|${d.query.to}|${d.mobility}`;
+  let tick: ReturnType<typeof setInterval> | null = null;
+  const stopTick = () => {
+    if (tick) clearInterval(tick);
+    tick = null;
+  };
+
+  function renderRace(d: RouteData) {
+    stopTick();
+    const card = $("ttf-race");
+    card.replaceChildren();
+    el("div", "card-title", `Route record · ${d.mobilityLabel}`, card);
+    if (d.leaderboard.length) {
+      const ol = el("ol", "lb", undefined, card);
+      d.leaderboard.forEach((a, i) => {
+        const li = el("li", i ? "" : "first", undefined, ol);
+        el("span", "", a.holder, li);
+        el("strong", "", a.label, li);
+      });
+    } else el("div", "muted", `No record yet. Planned time: ${d.timeLabel}. Be the first!`, card);
+    const running = state.race && state.race.key === raceKey(d) ? state.race : null;
+    const row = el("div", "race-row", undefined, card);
+    if (!running) {
+      const b = el("button", "primary", d.leaderboard.length ? `Race the record (${d.leaderboard[0].label})` : "Start the timer", row);
+      b.type = "button";
+      b.disabled = !canCall;
+      b.onclick = () => {
+        saveState({ race: { key: raceKey(d), startedAt: Date.now() } });
+        renderRace(d);
+      };
+    } else {
+      const t = el("span", "timer", clock((Date.now() - running.startedAt) / 1000), row);
+      tick = setInterval(() => (t.textContent = clock((Date.now() - running.startedAt) / 1000)), 500);
+      const done = el("button", "primary", "I've arrived", row);
+      const cancel = el("button", "", "Cancel", row);
+      done.type = cancel.type = "button";
+      cancel.onclick = () => {
+        saveState({ race: null });
+        renderRace(d);
+      };
+      done.onclick = () => {
+        stopTick();
+        finishRace(d, Math.max(1, Math.round((Date.now() - running.startedAt) / 1000)));
+      };
+    }
+    if (!d.persistent) el("div", "muted small", "Times are kept in memory until the database is connected.", card);
+  }
+
+  function finishRace(d: RouteData, seconds: number) {
+    const card = $("ttf-race");
+    card.replaceChildren();
+    el("div", "card-title", `You made it in ${clock(seconds)}`, card);
+    const form = el("form", "race-row", undefined, card);
+    const input = el("input", "", undefined, form);
+    input.placeholder = "Your name";
+    input.value = state.name ?? "";
+    input.maxLength = 40;
+    input.required = true;
+    input.setAttribute("aria-label", "Your name");
+    const send = el("button", "primary", "Save my time", form);
+    send.type = "submit";
+    const skip = el("button", "", "Skip", form);
+    skip.type = "button";
+    skip.onclick = () => {
+      saveState({ race: null });
+      renderRace(d);
+      renderFeedback(d, true);
+    };
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const name = input.value.trim();
+      if (!name) return;
+      send.disabled = true;
+      saveState({ name, race: null });
+      try {
+        toast((await call("log_attempt", { from: d.query.from, to: d.query.to, mobility: d.mobility, seconds, holder: name })).msg);
+      } catch (err) {
+        toast((err as Error).message);
+      }
+      await replan({});
+      renderFeedback(last ?? d, true);
+    };
+    input.focus();
+  }
+
+  function renderFeedback(d: RouteData, open: boolean) {
+    const card = $("ttf-feedback");
+    card.replaceChildren();
+    card.hidden = !open;
+    if (!open) return;
+    el("div", "card-title", "Help keep this route up to date", card);
+    const answer = async (buttons: HTMLButtonElement[], run: () => Promise<{ msg: string }>, refresh: boolean) => {
+      buttons.forEach((b) => (b.disabled = true));
+      try {
+        toast((await run()).msg);
+        if (refresh) await replan({});
+      } catch (e) {
+        toast((e as Error).message);
+        buttons.forEach((b) => (b.disabled = false));
+      }
+    };
+    for (const c of d.checks) {
+      const row = el("div", "fb-row", undefined, card);
+      el("span", "", `Was ${c.name} ${c.kind === "lift" ? "working" : "passable"}?`, row);
+      const y = el("button", "", "Yes", row),
+        n = el("button", "", "No", row);
+      y.type = n.type = "button";
+      y.disabled = n.disabled = !canCall;
+      y.onclick = () => answer([y, n], () => call("report_obstacle", { location: c.name, status: "clear" }), true);
+      n.onclick = () =>
+        answer(
+          [y, n],
+          () => call("report_obstacle", { location: c.name, status: "blocked", affects: c.kind === "lift" ? "wheelchair" : "everyone", note: "reported in the route widget" }),
+          true
+        );
+    }
+    const row = el("div", "fb-row", undefined, card);
+    el("span", "", "Anything blocking your way?", row);
+    const no = el("button", "", "No", row),
+      yes = el("button", "", "Yes", row);
+    no.type = yes.type = "button";
+    no.disabled = yes.disabled = !canCall;
+    no.onclick = () => {
+      no.disabled = yes.disabled = true;
+      toast("Thanks for checking!");
+    };
+    yes.onclick = () => {
+      no.disabled = yes.disabled = true;
+      const form = el("form", "race-row", undefined, card);
+      const where = el("input", "", undefined, form);
+      where.placeholder = "Where? e.g. Eingang Foyer 1, Halle 2";
+      where.required = true;
+      where.setAttribute("aria-label", "Where is the obstacle?");
+      const lab = el("label", "small", undefined, form);
+      const cb = el("input", "", undefined, lab);
+      cb.type = "checkbox";
+      lab.append(" only blocks wheelchairs");
+      const send = el("button", "primary", "Report", form);
+      send.type = "submit";
+      form.onsubmit = (e) => {
+        e.preventDefault();
+        answer(
+          [send],
+          () => call("report_obstacle", { location: where.value.trim(), status: "blocked", affects: cb.checked ? "wheelchair" : "everyone", note: "reported in the route widget" }),
+          true
+        );
+      };
+      where.focus();
+    };
+  }
+  $("ttf-report").onclick = () => last && renderFeedback(last, $("ttf-feedback").hidden);
+
+  function renderStand(d: RouteData) {
+    const card = $("ttf-stand");
+    card.replaceChildren();
+    card.hidden = !d.stand;
+    if (!d.stand) return;
+    const s = d.stand;
+    el("div", "card-title", s.exhibitor ?? "Stand", card);
+    el("div", "muted", [s.code && `Stand ${s.code}`, s.hall, ...s.categories.slice(0, 3)].filter(Boolean).join(" · "), card);
+    if (s.whyVisit) {
+      const det = el("details", "", undefined, card);
+      el("summary", "", "Why visit", det);
+      el("p", "", s.whyVisit, det);
+    }
+    if (s.alsoHere.length) el("div", "muted small", `Also here: ${s.alsoHere.join(", ")}`, card);
+    if (s.website) {
+      const a = el("a", "link", s.website.replace(/^https?:\/\//, "").replace(/\/$/, ""), card);
+      a.href = s.website;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+    }
+    if (d.otherStands.length) el("div", "muted small", `Similar stands: ${d.otherStands.join("; ")}`, card);
+  }
+
+  function renderDetails(d: RouteData) {
+    $("ttf-dir-sum").textContent = `Directions · ${d.steps.length} step${d.steps.length === 1 ? "" : "s"}`;
+    $("ttf-steps").replaceChildren(...d.steps.map((s) => el("li", "", s)));
+    $("ttf-foot").replaceChildren(...[...d.notes, d.disclaimer].map((s) => el("p", "", s)));
+    $("ttf-legend-fast").hidden = !d.fastestSegments;
+  }
+
+  const show = (d: RouteData | null | undefined, force = false) => {
+    if (!d || !d.segments || (d === last && !force)) return;
     last = d;
     drawRoute(d);
-    renderPanel(d);
+    renderHeader(d);
+    renderCompare(d);
+    renderRace(d);
+    renderStand(d);
+    renderDetails(d);
+    if (!$("ttf-feedback").hidden) renderFeedback(d, true);
   };
   const current = () => {
     try {

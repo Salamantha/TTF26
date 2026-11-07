@@ -2,7 +2,8 @@
 // (data/venue.json, regenerate with scripts/import-team05.mjs) joined with the 1. OG of Foyer 10 (lib/og.ts).
 import raw from "@/data/venue.json";
 import { Router, type GraphNode, type Pt } from "./routing";
-import { buildOg, CONNECTORS } from "./og";
+import { buildOg, CONNECTORS, OG_AREAS } from "./og";
+import { buildHotspots, densityAt, slowdown } from "./crowd";
 
 interface VenueData {
   name: string;
@@ -55,9 +56,31 @@ export const STAIRS_NODES = new Set(
   CONNECTORS.filter((k) => k.kind === "stairs").flatMap((k) => [`${k.id}:b`, `${k.id}:t`])
 );
 
+export const HOTSPOTS = buildHotspots({
+  entrances: VENUE.nodes.filter((n) => n.kind === "entrance").map((n) => n.p),
+  stages: VENUE.spaces.filter((s) => s.kind === "stage" && s.label).map((s) => s.label!),
+  pois: VENUE.pois,
+  booths: VENUE.spaces.filter((s) => s.kind === "booth" && s.label).map((s) => s.label!),
+  og: OG_AREAS.map((a) => ({ name: a.name, p: centroid(a.poly) })),
+  ogStairTops: CONNECTORS.filter((k) => k.kind === "stairs").map((k) => k.top),
+});
+
+/** Walking-time factor per graph node from the simulated crowd at time t; `space` = room the person needs. */
+export function crowdFactors(t: number, space: number) {
+  const out = new Map<string, number>();
+  for (const n of ROUTER.nodes) out.set(n.id, slowdown(densityAt(HOTSPOTS, n.p, levelOf(n.id) === "og" ? 1 : 0, t) * space));
+  return out;
+}
+
+function centroid(poly: Pt[]): Pt {
+  return [poly.reduce((a, p) => a + p[0], 0) / poly.length, poly.reduce((a, p) => a + p[1], 0) / poly.length];
+}
+
 export function levelOf(nodeId: string): "eg" | "og" {
   return nodeId.startsWith("og:") && !nodeId.endsWith(":b") ? "og" : "eg";
 }
+
+export const CONNECTOR_BY_NAME = new Map(CONNECTORS.map((k) => [k.name, k]));
 
 export function connectorOf(nodeId: string) {
   return CONNECTORS.find((k) => nodeId === `${k.id}:b` || nodeId === `${k.id}:t`);

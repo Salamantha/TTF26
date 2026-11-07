@@ -15,9 +15,13 @@ accessibility survey; every `find_accessible_route` response says so.
 - **1. OG of Foyer 10 (TTF Hackathon):** Tagungsräume 4-8, the 18 team tables, WCs, snack
   zone, and the stairs and lifts, ported from team-05's `levels.ts` (digitised from the
   organiser's event plan, checked against on-site photos). See `lib/og.ts`.
-- Stairs count as ~20 m of walking, a lift (wait + ride) as ~48 m. The step-free route never
-  uses stairs, which is where the gap comes from. "Lift Mitte" is left out because no photo
-  confirms it; Lift Ost and Treppe Lounge Ost were seen but their positions are estimated.
+- Stairs count as ~20 m of walking, a lift (wait + ride) as ~48 m. "Lift Mitte" is left out because
+  no photo confirms it; Lift Ost and Treppe Lounge Ost were seen but their positions are estimated.
+- **Mobility profiles** (from team-05): walking 1.34 m/s · cane/crutches 0.8 m/s, stairs 3× as costly ·
+  wheelchair 0.9 m/s, no stairs, needs more room in crowds.
+- **Visitor density is simulated** (team-05's crowd model in `lib/crowd.ts`: hotspots at entrances,
+  stages, food, WCs, the hackathon buffet…). Routes avoid dense spots by default; the widget can show
+  the heatmap. Server and widget share one clock (2 s real = 20 s simulated), so both show the same state.
 
 Places the tools understand: halls and foyers, the TTF Hackathon / Tagungsraum 4-8 / Tisch 1-18,
 stairs and lifts by name, exhibitor names, booth codes (e.g. `A-0212`), exhibitor categories
@@ -29,47 +33,53 @@ other stands in the same category.
 
 ## Code
 
-- `app/api/mcp/route.ts` — the MCP server (tools below) and the `ui://widget/route-map-v2.html` widget resource
+- `app/api/mcp/route.ts` — the MCP server (tools below) and the `ui://widget/route-map-3d-v2.html` widget resource
 - `lib/venue.ts` — data loading, the combined EG + OG graph, place lookup (`findPlace`)
 - `lib/og.ts` — the 1. OG floor and its stairs/lifts
-- `lib/routing.ts` — Dijkstra router (ported from team-05) with blocked nodes for obstacles
-- `lib/plan.ts` — plans a route and its stairs alternative, builds the widget data
+- `lib/routing.ts` — Dijkstra router (ported from team-05): blocked nodes, stairs factor per profile, crowd factor
+- `lib/crowd.ts` — simulated visitor density, shared by server and widget
+- `lib/plan.ts` — plans the profile's route plus fastest vs step-free for the comparison, adds record and lift confirmations
 - `widget/map3d.ts` — the interactive 3D map (three.js scene ported from team-05's `Map3D.tsx`): halls,
   booths, the 1. OG with steps and lift shafts, route tubes, click a booth to see its exhibitors
 - `scripts/build-widget.mjs` — bundles `widget/map3d.ts` with three.js into `lib/widget-bundle.generated.ts`
   (gitignored; runs automatically before `npm run dev` and `npm run build`)
 - `lib/widget.ts` — the widget HTML: venue geometry embedded once, plus the bundle and the text panel
-- `lib/store.ts` — obstacles + leaderboard (in memory, or Upstash Redis when configured)
-- `app/map/route.ts` — the same widget as a standalone page: `/map?from=entrance&to=TTF%20Hackathon&accessible=true`
+- `lib/store.ts` — obstacles, "confirmed working" times and leaderboards (Upstash Redis, or memory when not configured)
+- `app/map/route.ts` — the same widget as a standalone page, buttons included: `/map?from=entrance&to=TTF%20Hackathon&mobility=wheelchair` (add `&heat` to start with the heatmap on)
 
 ## Tools
 
 | Tool | Purpose |
 |---|---|
-| `find_accessible_route` | Route between two places, step-free (default) or fastest, with the stairs-vs-step-free gap and an inline map |
+| `find_accessible_route` | Route for a mobility profile (`walk` default, `cane`, `wheelchair`), optionally avoiding crowds, with fastest vs step-free comparison, record and the 3D widget |
 | `search_places` | Resolve an unclear place name and list close matches |
-| `report_obstacle` | Mark a place blocked (for everyone, or only for wheelchair users, e.g. a broken lift) or clear again |
+| `report_obstacle` | Mark a place blocked (for everyone, or only wheelchair users, e.g. a broken lift), or `clear` = works / confirmed working |
 | `list_obstacles` | Everything currently reported blocked |
-| `get_leaderboard` | Best recorded accessible-route time for a path |
-| `log_attempt` | Submit a completed time for the leaderboard |
+| `get_leaderboard` | Fastest times for a route and profile |
+| `log_attempt` | Submit a race time; faster ones replace the record, implausible ones (< 40 % of the walking time) are rejected |
 
 ## Demo script
 
-1. "Find an accessible route from the entrance to the TTF Hackathon" → step-free via Lift West, about 2m 19s; the stairs route via Treppe Nord takes about 1m 20s, a 59 s gap.
-2. "Lift West is out of service" → `report_obstacle` (affects: wheelchair); asking again reroutes via Lift Ost.
-3. "Lift West works again" → cleared.
-4. "Timo made it in 2:30" → `log_attempt` sets the record the next person races.
+1. "Timo has a broken leg and is on crutches, how does he get from the entrance to the TTF Hackathon?" →
+   the widget shows his route via Lift West, and the comparison card the fastest route via the stairs (Benny's)
+   and the step-free detour (~55 s). Toggle the profile buttons to compare walking / cane / wheelchair.
+2. "Race the record" in the widget starts the timer; "I've arrived" saves the time and asks for feedback:
+   "Was Lift West working?" → the card now shows "Lift West: confirmed working just now".
+3. "Lift West is out of service" → `report_obstacle`; the wheelchair route switches to Lift Ost.
+4. "Heatmap" shows the (simulated) crowd; with "avoid crowds" the route goes around busy spots.
 
-## The inline ChatGPT widget
+## The widget
 
 `find_accessible_route` sets `_meta["openai/outputTemplate"]` and `_meta.ui.resourceUri` to
-`ui://widget/route-map-3d-v1.html`. The widget is one HTML document (~1 MB, mostly three.js) that
-ChatGPT loads once per connector refresh; each tool result's `structuredContent` (a few KB) carries
-only the route and stand info, so nothing is fetched from inside the widget iframe. Change the URI
-whenever the widget changes, or ChatGPT keeps showing the cached old one. Because the delivery mechanism
-is documented inconsistently, the widget reads `window.openai.toolOutput`, listens for
-`openai:set_globals` and the `ui/notifications/tool-result` message, and polls briefly. If the
-widget doesn't render, the text answer still includes a `/map` link.
+`ui://widget/route-map-3d-v2.html`. Under the 3D map it shows, in this order: the mobility switch, a
+fastest-vs-step-free card with "confirmed working" times for lifts, the record with a race timer, feedback
+questions, the stand card, collapsed directions. Buttons call the tools through `window.openai.callTool`
+(on `/map` a small stand-in calls `/api/mcp`), the running timer survives reloads via `setWidgetState`.
+The tool's text answer is kept short and tells ChatGPT not to repeat what the widget shows.
+
+The widget is one HTML document (~1 MB, mostly three.js) that ChatGPT loads once per connector refresh;
+each result carries only the route data (a few KB). Change the URI whenever the widget changes, or ChatGPT
+keeps showing the cached old one.
 
 ## Run locally
 
@@ -85,9 +95,10 @@ npm run dev
 Pushing to `main` deploys on Vercel. Set `APP_BASE_URL=https://<your-domain>` so map links point
 at production (otherwise it falls back to Vercel's production URL).
 
-For obstacle reports and the leaderboard to survive serverless cold starts, create a free
-[Upstash Redis](https://upstash.com) database and set `UPSTASH_REDIS_REST_URL` and
-`UPSTASH_REDIS_REST_TOKEN`.
+**Database (needed for records and reports to survive cold starts):** in the Vercel project open
+Storage → Marketplace → Upstash Redis (free plan) → connect it to this project, then redeploy. The
+integration sets `KV_REST_API_URL` / `KV_REST_API_TOKEN`, which `lib/store.ts` reads (plain
+`UPSTASH_REDIS_REST_URL` / `_TOKEN` work too). Until then the widget says times are kept in memory only.
 
 ## Connect it to ChatGPT
 

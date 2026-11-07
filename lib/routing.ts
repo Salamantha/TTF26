@@ -13,7 +13,21 @@ export interface GraphNode {
 export interface RouteResult {
   nodeIds: string[];
   points: Pt[];
+  /** physical length walked */
   meters: number;
+  /** length weighted by stairs/lift costs and crowding; divide by the walking speed for the time */
+  effMeters: number;
+}
+
+export interface RouteOptions {
+  blocked: Set<string>;
+  /** stairs edges (both ends in this set) are multiplied by `stairsFactor`; Infinity = not usable */
+  stairsNodes: Set<string>;
+  stairsFactor: number;
+  /** walking-time factor per node from crowding (1 = free); null = no crowd data */
+  crowd: Map<string, number> | null;
+  /** choose the path with crowding taken into account (otherwise it only affects the time) */
+  avoidCrowd: boolean;
 }
 
 class Heap {
@@ -97,8 +111,11 @@ export class Router {
     return out;
   }
 
-  /** Shortest path from any of `from` to the nearest of `to`, never entering `blocked` nodes. */
-  route(from: string[], to: string[], blocked: Set<string>): RouteResult | null {
+  /** Cheapest path from any of `from` to the nearest of `to`, never entering blocked nodes. */
+  route(from: string[], to: string[], o: RouteOptions): RouteResult | null {
+    const { blocked } = o;
+    const pf = (a: string, b: string) => (o.stairsNodes.has(a) && o.stairsNodes.has(b) ? o.stairsFactor : 1);
+    const cf = (a: string, b: string) => (o.crowd ? ((o.crowd.get(a) ?? 1) + (o.crowd.get(b) ?? 1)) / 2 : 1);
     const targets = new Set(to.filter((t) => !blocked.has(t)));
     if (!targets.size) return null;
     const dist = new Map<string, number>();
@@ -119,7 +136,9 @@ export class Router {
       }
       for (const [v, w] of this.adj.get(u) ?? []) {
         if (blocked.has(v)) continue;
-        const nd = d + w;
+        const f = pf(u, v);
+        if (f === Infinity) continue;
+        const nd = d + w * f * (o.avoidCrowd ? cf(u, v) : 1);
         if (nd < (dist.get(v) ?? Infinity)) {
           dist.set(v, nd);
           prev.set(v, u);
@@ -131,6 +150,17 @@ export class Router {
     const nodeIds: string[] = [];
     for (let n: string | undefined = hit; n; n = prev.get(n)) nodeIds.push(n);
     nodeIds.reverse();
-    return { nodeIds, points: nodeIds.map((n) => this.pos.get(n)!), meters: dist.get(hit)! };
+    let meters = 0,
+      effMeters = 0;
+    for (let i = 1; i < nodeIds.length; i++) {
+      const a = nodeIds[i - 1],
+        b = nodeIds[i];
+      const [x0, y0] = this.pos.get(a)!,
+        [x1, y1] = this.pos.get(b)!;
+      meters += Math.hypot(x1 - x0, y1 - y0);
+      const w = this.adj.get(a)!.find((e) => e[0] === b)![1];
+      effMeters += w * pf(a, b) * cf(a, b);
+    }
+    return { nodeIds, points: nodeIds.map((n) => this.pos.get(n)!), meters, effMeters };
   }
 }
