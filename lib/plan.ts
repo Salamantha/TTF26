@@ -1,5 +1,5 @@
 import type { Pt, RouteResult } from "./routing";
-import { ROUTER, STAIRS_NODES, levelOf, connectorOf, findPlace, suggestPlaces, EXAMPLE_PLACES, type Place } from "./venue";
+import { ROUTER, STAIRS_NODES, levelOf, connectorOf, findPlace, suggestPlaces, standInfo, EXAMPLE_PLACES, type Place, type PlaceInstance, type StandInfo } from "./venue";
 import { getObstacles, getLeaderboardEntry, type LeaderboardRecord, type ObstacleRecord } from "./store";
 
 export const WALK_SPEED_MPS = 1.2;
@@ -15,6 +15,7 @@ export interface Segment {
 export interface Leg {
   fromName: string;
   toName: string;
+  dest: PlaceInstance | null;
   meters: number;
   seconds: number;
   via: string[];
@@ -35,6 +36,8 @@ export type Plan =
       obstacles: ObstacleRecord[];
       leaderboard: LeaderboardRecord | null;
       notes: string[];
+      stand: StandInfo | null;
+      otherStands: string[];
     };
 
 export function fmtSeconds(s: number) {
@@ -88,12 +91,14 @@ function describe(r: RouteResult, from: Place, to: Place): Leg {
   const first = r.nodeIds[0],
     last = r.nodeIds[r.nodeIds.length - 1];
   const fromName = from.instances.find((i) => i.anchors.includes(first))?.name ?? from.name;
-  const toName = to.instances.find((i) => i.anchors.includes(last))?.name ?? to.name;
+  const dest = to.instances.find((i) => i.anchors.includes(last)) ?? null;
+  const toName = dest?.name ?? to.name;
   if (walked > 1) steps.push(`Walk ~${Math.round(walked)} m ${floor(level)} to ${toName}`);
 
   return {
     fromName,
     toName,
+    dest,
     meters: Math.round(r.meters),
     seconds: r.meters / WALK_SPEED_MPS,
     via,
@@ -144,6 +149,10 @@ export async function planRoute(fromQ: string, toQ: string, accessible: boolean)
     obstacles,
     leaderboard: accessible ? await getLeaderboardEntry(from.id, to.id) : null,
     notes: [from.note, to.note].filter((n): n is string => !!n),
+    stand: route.dest ? standInfo(route.dest) : null,
+    otherStands: to.instances.length > 1 && route.dest?.exhibitorId
+      ? [...new Set(to.instances.filter((i) => i.exhibitorId !== route.dest!.exhibitorId).map((i) => i.name))].slice(0, 5)
+      : [],
   };
 }
 
@@ -173,6 +182,9 @@ export function widgetData(plan: Extract<Plan, { ok: true }>) {
     gapLabel,
     raceLabel,
     notes: plan.notes,
+    stand: plan.stand,
+    otherStands: plan.otherStands,
+    destSpaceId: route.dest?.spaceId ?? null,
     disclaimer: ESTIMATE_DISCLAIMER,
     segments: route.segments,
     fastestSegments: fastest && plan.gapSeconds ? fastest.segments : null,

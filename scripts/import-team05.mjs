@@ -11,6 +11,10 @@ const d = JSON.parse(readFileSync(src, "utf8"));
 const r1 = (v) => Math.round(v * 10) / 10;
 const pt = (p) => (p ? [r1(p[0]), r1(p[1])] : null);
 const poly = (ps) => (ps ? ps.map(pt) : null);
+const clip = (s, n) => {
+  const t = s.replace(/\s+/g, " ").trim();
+  return t.length <= n ? t : t.slice(0, t.lastIndexOf(" ", n)) + "…";
+};
 
 const out = {
   name: d.name,
@@ -22,6 +26,7 @@ const out = {
     code: s.code,
     name: s.name,
     hall: s.hall,
+    color: s.color,
     poly: poly(s.poly),
     label: pt(s.label),
   })),
@@ -29,7 +34,15 @@ const out = {
   annotations: d.annotations.map((a) => ({ text: a.text, p: pt(a.p) })),
   nodes: d.nodes.map((n) => ({ id: n.id, p: n.p, kind: n.kind, target: n.target })),
   edges: d.edges,
-  exhibitors: d.exhibitors.map((e) => ({ id: e.id, name: e.name, spaces: e.spaces })),
+  exhibitors: d.exhibitors.map((e) => ({
+    id: e.id,
+    name: e.name,
+    categories: e.categories,
+    whyVisit: e.whyVisit ? clip(e.whyVisit, 400) : null,
+    website: e.website,
+    city: e.city,
+    spaces: e.spaces,
+  })),
 };
 
 mkdirSync(resolve(root, "data"), { recursive: true });

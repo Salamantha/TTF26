@@ -28,10 +28,14 @@ const rect = (x0: number, y0: number, x1: number, y1: number): Pt[] => [c(x0, y0
 export const STAIRS_COST_M = 20;
 export const LIFT_COST_M = 48;
 
+export const OG_ELEVATION = 5;
+export const OG_ROOM_H = 4.4;
+
 export interface Connector {
   id: string;
   name: string;
   kind: "stairs" | "lift";
+  poly: Pt[];
   bottom: Pt;
   top: Pt;
   approx: boolean;
@@ -39,14 +43,50 @@ export interface Connector {
 
 // "Lift Mitte" is left out on purpose: it appears on the event plan but no photo confirms it.
 export const CONNECTORS: Connector[] = [
-  { id: "og:treppe-nord", name: "Treppe Nord", kind: "stairs", bottom: c(265, 222), top: c(325, 270), approx: false },
-  { id: "og:treppe-sued", name: "Treppe Süd", kind: "stairs", bottom: c(1235, 222), top: c(1285, 270), approx: false },
-  { id: "og:treppe-lobby-west", name: "Treppe Lobby West", kind: "stairs", bottom: c(-22, 293), top: c(-22, 470), approx: false },
-  { id: "og:lift-west", name: "Lift West", kind: "lift", bottom: c(-69, 270), top: c(-69, 282), approx: false },
+  { id: "og:treppe-nord", name: "Treppe Nord", kind: "stairs", poly: rect(265, 188, 385, 255), bottom: c(265, 222), top: c(325, 270), approx: false },
+  { id: "og:treppe-sued", name: "Treppe Süd", kind: "stairs", poly: rect(1235, 188, 1335, 255), bottom: c(1235, 222), top: c(1285, 270), approx: false },
+  { id: "og:treppe-lobby-west", name: "Treppe Lobby West", kind: "stairs", poly: rect(-45, 293, 0, 470), bottom: c(-22, 293), top: c(-22, 470), approx: false },
+  { id: "og:lift-west", name: "Lift West", kind: "lift", poly: rect(-90, 210, -48, 259), bottom: c(-69, 270), top: c(-69, 282), approx: false },
   // Seen in photos, position mirrored from the west side.
-  { id: "og:treppe-lounge-ost", name: "Treppe Lounge Ost", kind: "stairs", bottom: c(1617, 293), top: c(1617, 470), approx: true },
-  { id: "og:lift-ost", name: "Lift Ost", kind: "lift", bottom: c(1664, 270), top: c(1664, 282), approx: true },
+  { id: "og:treppe-lounge-ost", name: "Treppe Lounge Ost", kind: "stairs", poly: rect(1595, 293, 1640, 470), bottom: c(1617, 293), top: c(1617, 470), approx: true },
+  { id: "og:lift-ost", name: "Lift Ost", kind: "lift", poly: rect(1643, 210, 1685, 259), bottom: c(1664, 270), top: c(1664, 282), approx: true },
 ];
+
+export interface OgArea {
+  name: string;
+  kind: "room" | "lobby" | "service" | "wc" | "zone";
+  poly: Pt[];
+}
+
+export const OG_AREAS: OgArea[] = [
+  { name: "Tagungsraum 4", kind: "room", poly: rect(120, 305, 397, 598) },
+  { name: "Tagungsraum 5-7 (TTF)", kind: "room", poly: rect(397, 305, 1200, 598) },
+  { name: "Tagungsraum 8", kind: "room", poly: rect(1200, 305, 1475, 598) },
+  { name: "Lobby West", kind: "lobby", poly: rect(-95, 180, 120, 598) },
+  { name: "Lounge Ost", kind: "lobby", poly: rect(1475, 180, 1690, 598) },
+  { name: "Technik", kind: "service", poly: rect(180, 185, 262, 255) },
+  { name: "Technik", kind: "service", poly: rect(410, 185, 605, 255) },
+  { name: "Technik", kind: "service", poly: rect(610, 185, 770, 255) },
+  { name: "Technik", kind: "service", poly: rect(1055, 185, 1230, 255) },
+  { name: "Technik", kind: "service", poly: rect(1340, 185, 1430, 255) },
+  { name: "WC D/H", kind: "wc", poly: rect(775, 190, 830, 255) },
+  { name: "WC barrierefrei", kind: "wc", poly: rect(832, 190, 868, 255) },
+  { name: "WC", kind: "wc", poly: rect(955, 190, 1050, 255) },
+  { name: "Kino / Bühne", kind: "zone", poly: rect(145, 357, 372, 550) },
+  { name: "Ikea Recharge Area", kind: "zone", poly: rect(515, 325, 678, 423) },
+  { name: "Couchzone", kind: "zone", poly: rect(1077, 340, 1180, 478) },
+  { name: "Chillarea", kind: "zone", poly: rect(1075, 545, 1265, 590) },
+  { name: "Snackzone", kind: "zone", poly: rect(1258, 322, 1468, 355) },
+  { name: "Buffet", kind: "zone", poly: rect(1432, 380, 1468, 530) },
+];
+
+const TABLES: [number, number, number][] = [
+  [1, 451, 365], [2, 451, 452], [3, 451, 524], [4, 545, 452], [5, 545, 524], [6, 637, 452], [7, 637, 524],
+  [8, 731, 365], [9, 731, 452], [10, 731, 524], [11, 824, 365], [12, 827, 455], [13, 827, 519],
+  [14, 917, 365], [15, 917, 452], [16, 917, 524], [17, 1010, 365], [18, 1007, 450],
+];
+
+export const OG_TABLES = TABLES.map(([n, x, y]) => ({ n, poly: rect(x - 31, y - 19, x + 31, y + 19), label: c(x, y) }));
 
 export interface OgPlace {
   id: string;
@@ -62,7 +102,6 @@ export interface OgGraph {
   edges: [string, string, number][];
   places: OgPlace[];
   outline: Pt[];
-  rooms: { name: string; poly: Pt[] }[];
 }
 
 const dist = (a: Pt, b: Pt) => Math.round(Math.hypot(a[0] - b[0], a[1] - b[1]) * 100) / 100;
@@ -148,25 +187,10 @@ export function buildOg(): OgGraph {
   place("og:wc-barrierefrei", "WC barrierefrei (1. OG)", ["wc barrierefrei"], c(850, 222), cor(850), "wc_accessible");
   place("og:wc-dh", "WC D/H (1. OG)", ["wc d h"], c(802, 222), cor(802), "wc");
   place("og:wc", "WC (1. OG)", [], c(1002, 222), cor(1002), "wc");
-  const tables: [number, number, number][] = [
-    [1, 451, 365], [2, 451, 452], [3, 451, 524], [4, 545, 452], [5, 545, 524], [6, 637, 452], [7, 637, 524],
-    [8, 731, 365], [9, 731, 452], [10, 731, 524], [11, 824, 365], [12, 827, 455], [13, 827, 519],
-    [14, 917, 365], [15, 917, 452], [16, 917, 524], [17, 1010, 365], [18, 1007, 450],
-  ];
-  for (const [n, x, y] of tables) place(`og:tisch-${n}`, `Tisch ${n} (TTF Hackathon)`, [`tisch ${n}`, `table ${n}`], c(x, y), tr57);
+  for (const [n, x, y] of TABLES) place(`og:tisch-${n}`, `Tisch ${n} (TTF Hackathon)`, [`tisch ${n}`, `table ${n}`], c(x, y), tr57);
   for (const k of CONNECTORS) {
     places.push({ id: k.id, name: k.name, aliases: [k.name.toLowerCase()], node: `${k.id}:t`, p: k.top });
   }
 
-  return {
-    nodes,
-    edges,
-    places,
-    outline: rect(PLAN_X0, PLAN_Y0, PLAN_X1, 598),
-    rooms: [
-      { name: "Tagungsraum 4", poly: rect(120, 305, 397, 598) },
-      { name: "Tagungsraum 5-7 (TTF)", poly: rect(397, 305, 1200, 598) },
-      { name: "Tagungsraum 8", poly: rect(1200, 305, 1475, 598) },
-    ],
-  };
+  return { nodes, edges, places, outline: rect(PLAN_X0, PLAN_Y0, PLAN_X1, 598) };
 }

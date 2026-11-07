@@ -7,15 +7,31 @@ import { buildOg, CONNECTORS } from "./og";
 interface VenueData {
   name: string;
   halls: { name: string | null; poly: Pt[] | null; label: Pt | null }[];
-  spaces: { id: string; kind: string; code: string | null; name: string | null; hall: string | null; poly: Pt[] | null; label: Pt | null }[];
+  spaces: { id: string; kind: string; code: string | null; name: string | null; hall: string | null; color: string | null; poly: Pt[] | null; label: Pt | null }[];
   pois: { kind: string; name: string | null; p: Pt }[];
   annotations: { text: string; p: Pt }[];
   nodes: GraphNode[];
   edges: [string, string, number][];
-  exhibitors: { id: string; name: string; spaces: string[] }[];
+  exhibitors: Exhibitor[];
+}
+
+export interface Exhibitor {
+  id: string;
+  name: string;
+  categories: string[];
+  whyVisit: string | null;
+  website: string | null;
+  city: string | null;
+  spaces: string[];
 }
 
 export const VENUE = raw as unknown as VenueData;
+export const SPACE_BY_ID = new Map(VENUE.spaces.map((s) => [s.id, s]));
+export const EXHIBITOR_BY_ID = new Map(VENUE.exhibitors.map((e) => [e.id, e]));
+export const EXHIBITORS_BY_SPACE = new Map<string, Exhibitor[]>();
+for (const e of VENUE.exhibitors) {
+  for (const s of e.spaces) EXHIBITORS_BY_SPACE.set(s, [...(EXHIBITORS_BY_SPACE.get(s) ?? []), e]);
+}
 export const OG = buildOg();
 
 // Only the EG nodes within this distance of a stair/lift foot get linked to it.
@@ -53,6 +69,8 @@ export interface PlaceInstance {
   name: string;
   anchors: string[];
   p: Pt;
+  spaceId?: string;
+  exhibitorId?: string;
 }
 
 export interface Place {
@@ -146,15 +164,104 @@ function buildNamedPlaces(): NamedPlace[] {
     if (!s.name || s.kind === "booth" || !s.label) continue;
     out.push({ id: `space:${s.id}`, name: s.hall ? `${s.name} (${s.hall})` : s.name, names: [s.name], instances: [{ name: s.name, anchors: spaceAnchors(s.id, s.label), p: s.label }] });
   }
-  const spaceById = new Map(VENUE.spaces.map((s) => [s.id, s]));
   for (const e of VENUE.exhibitors) {
-    const instances = e.spaces
-      .map((id) => spaceById.get(id))
-      .filter((s): s is NonNullable<typeof s> => !!s?.label)
-      .map((s) => ({ name: `${e.name} (Stand ${s.code ?? "?"}${s.hall ? `, ${s.hall}` : ""})`, anchors: spaceAnchors(s.id, s.label), p: s.label! }));
+    const instances = exhibitorStands(e);
     if (instances.length) out.push({ id: `exhibitor:${e.id}`, name: instances[0].name, names: [e.name], instances });
   }
   return out;
+}
+
+function exhibitorStands(e: Exhibitor): PlaceInstance[] {
+  return e.spaces
+    .map((id) => SPACE_BY_ID.get(id))
+    .filter((s): s is NonNullable<typeof s> => !!s?.label)
+    .map((s) => ({
+      name: `${e.name} (Stand ${s.code ?? "?"}${s.hall ? `, ${s.hall}` : ""})`,
+      anchors: spaceAnchors(s.id, s.label),
+      p: s.label!,
+      spaceId: s.id,
+      exhibitorId: e.id,
+    }));
+}
+
+// English (and colloquial) words for the German exhibitor categories.
+const CATEGORY_SYN: Record<string, string> = {
+  icecream: "eis", gelato: "eis", eisstand: "eis", eiscreme: "eis", wine: "wein", wines: "wein", beer: "bier",
+  cheese: "kase", dessert: "desserts", sweets: "sussspeisen", chocolate: "confiserie", cake: "patisserie",
+  pastry: "patisserie", bread: "backwaren", bakery: "backwaren", meat: "fleisch", sausage: "wurstwaren", fish: "fisch",
+  seafood: "meeresfruchte", pasta: "nudeln", noodles: "nudeln", spices: "gewurze", juice: "fruchtsafte",
+  smoothie: "smoothies", champagne: "champagner", sparkling: "sekt", spirits: "spirituosen", gin: "spirituosen",
+  cocktail: "mix", cocktails: "mix", vegan: "vegane", organic: "bio", tea: "tee", furniture: "mobiliar",
+  lighting: "beleuchtungssysteme", textiles: "textilien", cleaning: "reinigung", hygiene: "betriebshygiene",
+};
+const EXHIBITOR_CATEGORIES = [...new Set(VENUE.exhibitors.flatMap((e) => e.categories))].map((c) => ({
+  name: c,
+  tokens: normalize(c).split(" ").filter((t) => t.length > 1),
+}));
+
+function exhibitorCategory(qt: string[]): string | null {
+  let best: string | null = null,
+    bs = 0;
+  for (const c of EXHIBITOR_CATEGORIES) {
+    let s = 0;
+    for (const t of qt) {
+      if (t.length < 3) continue;
+      if (c.tokens.includes(t)) s += 2;
+      else if (t.length >= 4 && c.tokens.some((ct) => ct.startsWith(t))) s += 1;
+    }
+    if (s > bs) {
+      bs = s;
+      best = c.name;
+    }
+  }
+  return best;
+}
+
+function exhibitorCategoryPlace(category: string): Place {
+  const exhibitors = VENUE.exhibitors.filter((e) => e.categories.includes(category));
+  // Prefer specialists: wholesalers list dozens of categories; an ice cream maker lists few or says so.
+  const words = new Set(normalize(category).split(" ").filter((t) => t.length > 1));
+  for (const [syn, target] of Object.entries(CATEGORY_SYN)) if (words.has(target)) words.add(syn);
+  const mentions = (e: Exhibitor) =>
+    normalize(`${e.name} ${e.whyVisit ?? ""}`)
+      .replace(/\bice ?cream\b/g, "icecream")
+      .split(" ")
+      .some((t) => words.has(t) || [...words].some((w) => w.length >= 3 && t.endsWith(w) && t.length <= w.length + 6));
+  const specialists = exhibitors.filter((e) => e.categories.length <= 3 || mentions(e));
+  const pool = specialists.length ? specialists : exhibitors;
+  return {
+    id: `excat:${normalize(category)}`,
+    name: `nearest "${category}" stand`,
+    instances: pool.flatMap(exhibitorStands),
+    note: `${exhibitors.length} exhibitors are listed under "${category}"; this routes to the nearest ${specialists.length ? "specialist" : "one"}.`,
+  };
+}
+
+export interface StandInfo {
+  code: string | null;
+  hall: string | null;
+  exhibitor: string | null;
+  categories: string[];
+  whyVisit: string | null;
+  website: string | null;
+  alsoHere: string[];
+}
+
+export function standInfo(inst: PlaceInstance): StandInfo | null {
+  if (!inst.spaceId) return null;
+  const s = SPACE_BY_ID.get(inst.spaceId);
+  if (!s) return null;
+  const here = EXHIBITORS_BY_SPACE.get(s.id) ?? [];
+  const e = (inst.exhibitorId && EXHIBITOR_BY_ID.get(inst.exhibitorId)) || here[0];
+  return {
+    code: s.code,
+    hall: s.hall,
+    exhibitor: e?.name ?? s.name,
+    categories: e?.categories ?? [],
+    whyVisit: e?.whyVisit ?? null,
+    website: e?.website ?? null,
+    alsoHere: here.filter((x) => x !== e).map((x) => x.name),
+  };
 }
 
 const NAMED = buildNamedPlaces();
@@ -206,16 +313,12 @@ const CATEGORIES: Category[] = [
   {
     id: "cat:food",
     name: "nearest food stand",
-    words: ["food", "essen", "imbiss", "snack", "snacks", "eis", "eisstand", "icecream", "ice cream", "gelato", "restaurant", "bistro", "lunch", "mittagessen", "hungry", "burger", "pizza", "eat"],
+    words: ["food", "essen", "imbiss", "snack", "snacks", "restaurant", "bistro", "lunch", "mittagessen", "hungry", "burger", "pizza", "eat"],
     instances: () => [
       ...egPois(["food"], "Food"),
       ...VENUE.annotations.filter((a) => /bistro/i.test(a.text)).map((a) => ({ name: a.text, anchors: anchorAt(a.p), p: a.p })),
       ...ogPois("food"),
     ],
-    note: (q) =>
-      has(q, ["eis", "eisstand", "icecream", "gelato"]) || q.includes("ice cream")
-        ? "The venue data has no dedicated ice cream stand, so this routes to the nearest food spot."
-        : undefined,
   },
   { id: "cat:cafe", name: "nearest café", words: ["cafe", "kaffee", "coffee", "espresso", "cappuccino"], instances: () => egPois(["cafe"], "Café") },
   { id: "cat:info", name: "nearest info point", words: ["info", "information", "infopoint", "infostand", "help"], instances: () => egPois(["info"], "Info") },
@@ -227,14 +330,16 @@ const CATEGORIES: Category[] = [
 ];
 
 export function findPlace(query: string): Place | null {
-  const q = normalize(query);
+  const q = normalize(query).replace(/\bice ?cream\b/g, "icecream");
   if (!q) return null;
-  const qt = tokens(query);
+  const qt = tokens(q);
 
   const code = q.replace(/ /g, "");
   const booth = BOOTHS_BY_CODE.get(code);
   if (booth) {
-    return { id: `space:${booth.id}`, name: `Stand ${booth.code}${booth.hall ? ` (${booth.hall})` : ""}`, instances: [{ name: `Stand ${booth.code}`, anchors: spaceAnchors(booth.id, booth.label), p: booth.label! }] };
+    const e = EXHIBITORS_BY_SPACE.get(booth.id)?.[0];
+    const name = `${e ? `${e.name} (` : ""}Stand ${booth.code}${booth.hall ? `, ${booth.hall}` : ""}${e ? ")" : ""}`;
+    return { id: `space:${booth.id}`, name, instances: [{ name, anchors: spaceAnchors(booth.id, booth.label), p: booth.label!, spaceId: booth.id, exhibitorId: e?.id }] };
   }
 
   let best: NamedPlace | null = null,
@@ -252,6 +357,11 @@ export function findPlace(query: string): Place | null {
   if (best && bs >= 0.85) return best;
 
   if (has(q, TOILET) && has(q, ACCESSIBLE)) return categoryPlace(CATEGORIES[0], q);
+  // Venue-service words (food, coffee, toilet…) mean the venue's own spots, not exhibitors selling those things.
+  const serviceWords = new Set(CATEGORIES.flatMap((c) => c.words));
+  const productWords = qt.filter((t) => !serviceWords.has(t)).map((t) => CATEGORY_SYN[t] ?? t);
+  const exCat = productWords.length ? exhibitorCategory(productWords) : null;
+  if (exCat) return exhibitorCategoryPlace(exCat);
   for (const cat of CATEGORIES.slice(1)) {
     if (has(q, cat.words) || cat.words.some((w) => w.includes(" ") && q.includes(w))) {
       if (cat.id === "cat:entrance" && qt.some(isNum)) {

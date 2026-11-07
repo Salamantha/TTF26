@@ -1,175 +1,102 @@
-// Route map widget for ChatGPT (Apps SDK, ui:// resource) and the /map page.
-// The static venue plan is baked into the HTML once; each tool result only carries the route
-// (WidgetData from lib/plan.ts), so nothing is fetched from inside the sandboxed iframe.
-import { VENUE, OG } from "./venue";
-import type { Pt } from "./routing";
+// Route map widget for ChatGPT (Apps SDK ui:// resource) and the /map page: an interactive 3D venue
+// (widget/map3d.ts, bundled with three.js) plus a text panel. The static venue geometry is embedded once;
+// each tool result only carries the route (WidgetData from lib/plan.ts).
+import { VENUE, OG, EXHIBITORS_BY_SPACE } from "./venue";
+import { CONNECTORS, OG_AREAS, OG_TABLES, OG_ELEVATION, OG_ROOM_H } from "./og";
+import { WIDGET_JS } from "./widget-bundle.generated";
 
-export const ROUTE_MAP_WIDGET_URI = "ui://widget/route-map-v2.html";
+export const ROUTE_MAP_WIDGET_URI = "ui://widget/route-map-3d-v1.html";
 
-const pts = (p: Pt[]) => p.map(([x, y]) => `${x},${y}`).join(" ");
-const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+// Approximate outer hall heights in metres, from team-05's Map3D.
+const HALL_HEIGHTS: Record<string, number> = {
+  "Halle 1": 12, "Halle 2": 8.5, "Halle 3": 8.5, "Halle 4": 8, "Halle 5": 8.5, "Halle 6": 8.5, "Halle 7": 9,
+  "Halle 8": 9, "Halle 9": 9, "Halle 10": 12.5, "Foyer 10": 10, "Foyer 1": 12, "Foyer 3": 7,
+};
 
-function baseMapSvg() {
-  const halls = VENUE.halls
-    .filter((h) => h.poly)
-    .map((h) => `<polygon points="${pts(h.poly!)}" class="hall"/>`)
-    .join("");
-  const booths = VENUE.spaces
+const venue3d = {
+  halls: VENUE.halls
+    .filter((h) => h.poly && h.poly.length > 2)
+    .map((h) => ({ name: h.name, poly: h.poly, label: h.label, h: h.name ? HALL_HEIGHTS[h.name] ?? 8 : 10 })),
+  booths: VENUE.spaces
     .filter((s) => s.poly && (s.kind === "booth" || s.kind === "stage"))
-    .map((s) => `<polygon points="${pts(s.poly!)}"/>`)
-    .join("");
-  const labels = VENUE.halls
-    .filter((h) => h.name && h.label)
-    .map((h) => `<text x="${h.label![0]}" y="${h.label![1]}">${esc(h.name!)}</text>`)
-    .join("");
-  const og = [
-    `<polygon points="${pts(OG.outline)}" class="og-outline"/>`,
-    ...OG.rooms.map((r) => `<polygon points="${pts(r.poly)}" class="og-room"/>`),
-  ].join("");
-  return `<g class="halls">${halls}</g><g class="booths">${booths}</g><g class="og">${og}</g><g class="hall-labels">${labels}</g>`;
-}
+    .map((s) => ({
+      id: s.id,
+      poly: s.poly,
+      code: s.code,
+      kind: s.kind,
+      color: s.color,
+      label: s.label,
+      ex: (EXHIBITORS_BY_SPACE.get(s.id) ?? []).map((e) => e.name).join(" · ") || s.name || "",
+    })),
+  blocks: VENUE.spaces.filter((s) => s.poly && s.kind === "obstacle").map((s) => s.poly),
+  og: {
+    elevation: OG_ELEVATION,
+    roomH: OG_ROOM_H,
+    outline: OG.outline,
+    areas: OG_AREAS,
+    tables: OG_TABLES,
+    connectors: CONNECTORS.map(({ name, kind, poly, bottom, top, approx }) => ({ name, kind, poly, bottom, top, approx })),
+  },
+};
 
 const STYLE = `
-#ttf-root{font-family:system-ui,-apple-system,sans-serif;color:#1f2328;background:#fff;padding:12px;border-radius:12px;max-width:640px}
+#ttf-root{--fg:#1f2328;--muted:#57606a;--card:#fff;--line:#d0d7de;--chip:#f6f8fa;font-family:system-ui,-apple-system,sans-serif;color:var(--fg);background:var(--card);border-radius:12px;padding:12px}
+#ttf-root.dark{--fg:#e6edf3;--muted:#9da7b3;--card:#0d1117;--line:#30363d;--chip:#161b22}
 #ttf-root h2{font-size:15px;margin:0 0 2px}
-#ttf-root .sub{color:#57606a;font-size:13px;margin:0 0 8px}
-#ttf-map{width:100%;height:340px;display:block;background:#f6f7f9;border:1px solid #d0d7de;border-radius:8px}
-#ttf-map .hall{fill:#fff;stroke:#b6bcc4;stroke-width:.4}
-#ttf-map .booths polygon{fill:#e6ebf1}
-#ttf-map .og-outline{fill:none;stroke:#2563eb;stroke-width:.5;stroke-dasharray:2 1.5;opacity:.7}
-#ttf-map .og-room{fill:#2563eb;fill-opacity:.06;stroke:none}
-#ttf-map .hall-labels text{font-size:5px;fill:#8c959f;text-anchor:middle;font-weight:600}
-#ttf-root ol{margin:8px 0 0;padding-left:20px;font-size:13px;line-height:1.5}
-#ttf-root .foot{color:#57606a;font-size:12px;line-height:1.5;margin-top:8px}
-#ttf-root .foot p{margin:4px 0}
-#ttf-root .legend{display:flex;flex-wrap:wrap;gap:10px;font-size:12px;color:#57606a;margin-top:6px}
-#ttf-root .legend i{display:inline-block;width:14px;height:3px;vertical-align:middle;margin-right:4px}
-`;
-
-const SCRIPT = `
-(function () {
-  var NS = "http://www.w3.org/2000/svg";
-  var svg = document.getElementById("ttf-map");
-  var layer = document.getElementById("ttf-route");
-
-  function sv(tag, attrs, parent) {
-    var n = document.createElementNS(NS, tag);
-    for (var k in attrs) n.setAttribute(k, attrs[k]);
-    (parent || layer).appendChild(n);
-    return n;
-  }
-  function el(tag, text, parent) {
-    var n = document.createElement(tag);
-    if (text != null) n.textContent = text;
-    if (parent) parent.appendChild(n);
-    return n;
-  }
-  function line(points, attrs) {
-    if (!points || points.length < 2) return;
-    attrs.points = points.map(function (p) { return p[0] + "," + p[1]; }).join(" ");
-    attrs.fill = "none";
-    attrs["stroke-linecap"] = "round";
-    attrs["stroke-linejoin"] = "round";
-    sv("polyline", attrs);
-  }
-
-  function render(d) {
-    if (!d || !d.segments) return;
-    while (layer.firstChild) layer.removeChild(layer.firstChild);
-
-    var all = [];
-    d.segments.forEach(function (s) { all = all.concat(s.points); });
-    (d.fastestSegments || []).forEach(function (s) { all = all.concat(s.points); });
-    var x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    all.forEach(function (p) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); });
-    var pad = 18, w = Math.max(x1 - x0 + 2 * pad, 70), h = Math.max(y1 - y0 + 2 * pad, 50);
-    var cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
-    svg.setAttribute("viewBox", (cx - w / 2) + " " + (cy - h / 2) + " " + w + " " + h);
-    var k = Math.max(w, h) / 120;
-
-    (d.fastestSegments || []).forEach(function (s) {
-      line(s.points, { stroke: "#d97706", "stroke-width": 0.9 * k, "stroke-dasharray": (2 * k) + " " + (1.5 * k), opacity: 0.9 });
-    });
-    d.segments.forEach(function (s) {
-      line(s.points, { stroke: "#fff", "stroke-width": 2.6 * k });
-      line(s.points, { stroke: s.level === "og" ? "#2563eb" : "#1a7f37", "stroke-width": 1.5 * k });
-    });
-    for (var i = 1; i < d.segments.length; i++) {
-      var p = d.segments[i].points[0];
-      sv("rect", { x: p[0] - 1.6 * k, y: p[1] - 1.6 * k, width: 3.2 * k, height: 3.2 * k, rx: 0.6 * k, fill: "#2563eb", stroke: "#fff", "stroke-width": 0.4 * k });
-      var t = sv("text", { x: p[0] + 2.4 * k, y: p[1] + 1 * k, "font-size": 3.4 * k, fill: "#1e3a8a", "font-weight": 700 });
-      t.textContent = d.via[i - 1] || "";
-    }
-    (d.obstacles || []).forEach(function (o) {
-      var g = sv("g", {});
-      sv("circle", { cx: o.p[0], cy: o.p[1], r: 2.2 * k, fill: "#d1242f", stroke: "#fff", "stroke-width": 0.5 * k }, g);
-      var x = sv("text", { x: o.p[0], y: o.p[1] + 1.1 * k, "font-size": 3 * k, fill: "#fff", "text-anchor": "middle", "font-weight": 700 }, g);
-      x.textContent = "!";
-      var tt = document.createElementNS(NS, "title");
-      tt.textContent = o.label + (o.affects === "wheelchair" ? " (blocks wheelchairs)" : " (blocked)");
-      g.appendChild(tt);
-    });
-    function pin(p, label, color) {
-      if (!p) return;
-      sv("circle", { cx: p[0], cy: p[1], r: 2.4 * k, fill: color, stroke: "#fff", "stroke-width": 0.6 * k });
-      var t = sv("text", { x: p[0], y: p[1] + 1.2 * k, "font-size": 3.2 * k, fill: "#fff", "text-anchor": "middle", "font-weight": 700 });
-      t.textContent = label;
-    }
-    pin(d.start, "A", "#1a7f37");
-    pin(d.end, "B", "#cf222e");
-
-    document.getElementById("ttf-title").textContent =
-      (d.accessible ? "Step-free route: " : "Fastest route: ") + d.fromName + " \\u2192 " + d.toName;
-    document.getElementById("ttf-sub").textContent =
-      d.totalTimeLabel + " \\u00b7 " + d.distanceLabel + (d.via && d.via.length ? " \\u00b7 via " + d.via.join(", ") : "");
-
-    var ol = document.getElementById("ttf-steps");
-    while (ol.firstChild) ol.removeChild(ol.firstChild);
-    (d.steps || []).forEach(function (s) { el("li", s, ol); });
-
-    var foot = document.getElementById("ttf-foot");
-    while (foot.firstChild) foot.removeChild(foot.firstChild);
-    [].concat(d.notes || [], [d.gapLabel, d.raceLabel, d.disclaimer]).forEach(function (s) { if (s) el("p", s, foot); });
-
-    document.getElementById("ttf-legend-fast").style.display = d.fastestSegments ? "" : "none";
-  }
-
-  function current() {
-    try { return window.openai && window.openai.toolOutput; } catch (e) { return null; }
-  }
-  render(current());
-  window.addEventListener("openai:set_globals", function (e) {
-    var g = e && e.detail && e.detail.globals;
-    render(g && g.toolOutput ? g.toolOutput : current());
-  });
-  window.addEventListener("message", function (e) {
-    var m = e && e.data;
-    if (m && m.jsonrpc === "2.0" && m.method === "ui/notifications/tool-result" && m.params) {
-      render(m.params.structuredContent || m.params);
-    }
-  });
-  var tries = 0, poll = setInterval(function () {
-    var d = current();
-    if (d || ++tries > 20) { clearInterval(poll); if (d) render(d); }
-  }, 250);
-})();
+#ttf-root .sub{color:var(--muted);font-size:13px;margin:0 0 8px}
+#ttf-wrap{position:relative;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+#ttf-3d{position:relative;width:100%;height:420px;touch-action:none}
+#ttf-tools{position:absolute;right:8px;top:8px;display:flex;gap:6px;z-index:2}
+#ttf-tools button{font:600 12px system-ui,sans-serif;padding:6px 9px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer}
+#ttf-pick{position:absolute;left:8px;bottom:8px;max-width:70%;z-index:2;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font-size:12px;line-height:1.4}
+#ttf-pick[hidden],#ttf-stand[hidden],#ttf-legend-fast[hidden],#ttf-full[hidden]{display:none}
+.l3{font:600 11px system-ui,sans-serif;color:var(--fg);white-space:nowrap;text-shadow:0 0 3px var(--card),0 0 3px var(--card)}
+.l3.hall{font-size:14px;opacity:.75}
+.l3.booth{font-size:9px;color:var(--muted)}
+.l3.og{font-size:10px;color:#2563eb}
+.dark .l3.og{color:#79b8ff}
+.l3.table{font-size:9px}
+.l3.stair{color:#b45309}
+.l3.obstacle{color:#fff;background:#d1242f;padding:2px 6px;border-radius:6px;text-shadow:none}
+.l3.pin{width:22px;height:22px;line-height:22px;text-align:center;border-radius:50%;color:#fff;text-shadow:none;border:2px solid #fff;font-size:12px}
+.l3.pin.a{background:#1a7f37}
+.l3.pin.b{background:#cf222e}
+#ttf-legend{display:flex;flex-wrap:wrap;gap:12px;font-size:12px;color:var(--muted);margin:8px 0 0}
+#ttf-legend i{display:inline-block;width:14px;height:4px;border-radius:2px;vertical-align:middle;margin-right:5px}
+#ttf-stand{margin-top:10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:var(--chip);font-size:13px;line-height:1.45}
+#ttf-stand .stand-name{font-weight:700;font-size:14px}
+#ttf-stand .stand-meta,#ttf-stand .stand-cats{color:var(--muted);font-size:12px}
+#ttf-stand .stand-why{margin:6px 0}
+#ttf-stand .stand-link{color:#0969da;font-size:12px}
+.dark #ttf-stand .stand-link{color:#58a6ff}
+#ttf-steps{margin:10px 0 0;padding-left:20px;font-size:13px;line-height:1.55}
+#ttf-foot{color:var(--muted);font-size:12px;line-height:1.5;margin-top:8px}
+#ttf-foot p{margin:3px 0}
 `;
 
 export const ROUTE_MAP_WIDGET_HTML = `<style>${STYLE}</style>
 <div id="ttf-root">
-  <h2 id="ttf-title">Loading route…</h2>
-  <p class="sub" id="ttf-sub"></p>
-  <svg id="ttf-map" viewBox="-150 -290 300 450" role="img" aria-label="Venue map with the route">
-    ${baseMapSvg()}
-    <g id="ttf-route"></g>
-  </svg>
-  <div class="legend">
+  <h2 id="ttf-title">Salzburg Messe</h2>
+  <p class="sub" id="ttf-sub">Loading route…</p>
+  <div id="ttf-wrap">
+    <div id="ttf-3d"></div>
+    <div id="ttf-tools">
+      <button id="ttf-reset" type="button" title="Show the whole route">Route</button>
+      <button id="ttf-top" type="button" title="View from above">Top</button>
+      <button id="ttf-full" type="button" title="Fullscreen">⤢</button>
+    </div>
+    <div id="ttf-pick" hidden></div>
+  </div>
+  <div id="ttf-legend">
     <span><i style="background:#1a7f37"></i>ground floor</span>
     <span><i style="background:#2563eb"></i>1. OG</span>
     <span id="ttf-legend-fast"><i style="background:#d97706"></i>faster route with stairs</span>
-    <span><i style="background:#d1242f;height:8px;width:8px;border-radius:50%"></i>reported obstacle</span>
+    <span><i style="background:#e4572e"></i>destination stand</span>
+    <span>drag to rotate · scroll to zoom · click a booth</span>
   </div>
+  <div id="ttf-stand" hidden></div>
   <ol id="ttf-steps"></ol>
-  <div class="foot" id="ttf-foot"></div>
+  <div id="ttf-foot"></div>
 </div>
-<script>${SCRIPT}</script>`;
+<script>window.__TTF_VENUE__=${JSON.stringify(venue3d).replace(/</g, "\\u003c")};</script>
+<script>${WIDGET_JS}</script>`;

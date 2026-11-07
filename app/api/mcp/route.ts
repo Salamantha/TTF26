@@ -50,6 +50,17 @@ const handler = createMcpHandler((server) => {
         `${accessible ? "Step-free" : "Fastest"} route from ${data.fromName} to ${data.toName}: ${data.totalTimeLabel}, ${data.distanceLabel}${data.via.length ? `, via ${data.via.join(", ")}` : ""}.`,
         ...data.steps.map((s, i) => `${i + 1}. ${s}`),
         ...data.notes,
+        data.stand &&
+          [
+            `Stand: ${data.stand.exhibitor ?? "?"}${data.stand.code ? `, Stand ${data.stand.code}` : ""}${data.stand.hall ? `, ${data.stand.hall}` : ""}.`,
+            data.stand.categories.length ? `Categories: ${data.stand.categories.join(", ")}.` : "",
+            data.stand.whyVisit ? `Why visit: ${data.stand.whyVisit}` : "",
+            data.stand.alsoHere.length ? `Also at this stand: ${data.stand.alsoHere.join(", ")}.` : "",
+            data.stand.website ? `Website: ${data.stand.website}` : "",
+          ]
+            .filter(Boolean)
+            .join("\n"),
+        data.otherStands.length ? `Other stands in this category: ${data.otherStands.join("; ")}.` : "",
         data.gapLabel,
         data.raceLabel,
         ESTIMATE_DISCLAIMER,

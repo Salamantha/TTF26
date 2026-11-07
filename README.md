@@ -20,10 +20,12 @@ accessibility survey; every `find_accessible_route` response says so.
   confirms it; Lift Ost and Treppe Lounge Ost were seen but their positions are estimated.
 
 Places the tools understand: halls and foyers, the TTF Hackathon / Tagungsraum 4-8 / Tisch 1-18,
-stairs and lifts by name, exhibitor names, booth codes (e.g. `A-0212`), and categories:
-food (also "ice cream", which routes to the nearest food spot, since there is no ice cream
-stand in the data), coffee, toilet, accessible toilet, info, cloakroom, first aid, ATM,
-tickets, entrance.
+stairs and lifts by name, exhibitor names, booth codes (e.g. `A-0212`), exhibitor categories
+("ice cream" → the nearest "Eis" specialist, also wine, cheese, desserts, coffee machines…; English
+words are mapped to the German categories in `CATEGORY_SYN`), and venue services: food, coffee,
+toilet, accessible toilet, info, cloakroom, first aid, ATM, tickets, entrance. When the destination
+is a stand, the answer and the widget show the exhibitor, categories, "why visit" text, website and
+other stands in the same category.
 
 ## Code
 
@@ -32,7 +34,11 @@ tickets, entrance.
 - `lib/og.ts` — the 1. OG floor and its stairs/lifts
 - `lib/routing.ts` — Dijkstra router (ported from team-05) with blocked nodes for obstacles
 - `lib/plan.ts` — plans a route and its stairs alternative, builds the widget data
-- `lib/widget.ts` — the map widget: static venue plan baked into the HTML, route drawn from the tool result
+- `widget/map3d.ts` — the interactive 3D map (three.js scene ported from team-05's `Map3D.tsx`): halls,
+  booths, the 1. OG with steps and lift shafts, route tubes, click a booth to see its exhibitors
+- `scripts/build-widget.mjs` — bundles `widget/map3d.ts` with three.js into `lib/widget-bundle.generated.ts`
+  (gitignored; runs automatically before `npm run dev` and `npm run build`)
+- `lib/widget.ts` — the widget HTML: venue geometry embedded once, plus the bundle and the text panel
 - `lib/store.ts` — obstacles + leaderboard (in memory, or Upstash Redis when configured)
 - `app/map/route.ts` — the same widget as a standalone page: `/map?from=entrance&to=TTF%20Hackathon&accessible=true`
 
@@ -57,8 +63,10 @@ tickets, entrance.
 ## The inline ChatGPT widget
 
 `find_accessible_route` sets `_meta["openai/outputTemplate"]` and `_meta.ui.resourceUri` to
-`ui://widget/route-map-v2.html`. The tool result's `structuredContent` (about 1.6 KB) carries only
-the route, so nothing is fetched from inside the widget iframe. Because the delivery mechanism
+`ui://widget/route-map-3d-v1.html`. The widget is one HTML document (~1 MB, mostly three.js) that
+ChatGPT loads once per connector refresh; each tool result's `structuredContent` (a few KB) carries
+only the route and stand info, so nothing is fetched from inside the widget iframe. Change the URI
+whenever the widget changes, or ChatGPT keeps showing the cached old one. Because the delivery mechanism
 is documented inconsistently, the widget reads `window.openai.toolOutput`, listens for
 `openai:set_globals` and the `ui/notifications/tool-result` message, and polls briefly. If the
 widget doesn't render, the text answer still includes a `/map` link.
