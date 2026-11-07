@@ -18,88 +18,55 @@ function fmtSeconds(s: number) {
 
 const handler = createMcpHandler((server) => {
   server.registerTool(
-    "find_accessible_route",
+    "find_walking_route",
     {
-      title: "Find accessible route",
-      description:
-        "Finds a walking route between two points inside the Salzburg Messe (e.g. from an entrance to the TTF venue hall), avoiding stairs and any currently reported obstacles for wheelchair/crutches users. Also reports the time gap versus the fastest non-accessible route, and whether there's a leaderboard record to beat.",
+      title: "Find walking route",
+      description: "Finds an ordinary walking route between two points inside the Salzburg Messe demo graph, avoiding currently reported blocked segments. Accessibility has not been assessed.",
       inputSchema: z.object({
         from: z.string().describe("Starting point, e.g. 'Westeingang' or 'entrance_west'"),
         to: z.string().describe("Destination, e.g. 'Halle 2' or 'TTF venue'"),
-        accessible: z
-          .boolean()
-          .default(true)
-          .describe("Whether the route must avoid stairs and other non-wheelchair-accessible edges"),
       }),
     },
-    async ({ from, to, accessible }) => {
+    async ({ from, to }) => {
       const fromNode = findNode(from);
       const toNode = findNode(to);
       if (!fromNode || !toNode) {
         return {
-          content: [
-            {
-              type: "text",
-              text: `Could not resolve one of the locations. Known locations: ${NODES.map((n) => n.name).join(", ")}`,
-            },
-          ],
+          content: [{
+            type: "text",
+            text: `Could not resolve one of the locations. Known locations: ${NODES.map((n) => n.name).join(", ")}.`,
+          }],
           isError: true,
         };
       }
 
       const obstacles = await getObstacles();
-      const route = computeRoute(fromNode.id, toNode.id, accessible, obstacles);
+      const route = computeRoute(fromNode.id, toNode.id, false, obstacles);
       if (!route) {
         return {
-          content: [
-            {
-              type: "text",
-              text: `No ${accessible ? "accessible " : ""}route found between ${fromNode.name} and ${toNode.name} right now — it may be fully blocked by reported obstacles.`,
-            },
-          ],
+          content: [{
+            type: "text",
+            text: `No walking route found between ${fromNode.name} and ${toNode.name} right now — it may be fully blocked by reported obstacles.`,
+          }],
           isError: true,
         };
       }
 
-      let gapText = "";
-      if (accessible) {
-        const fastest = computeRoute(fromNode.id, toNode.id, false, obstacles);
-        if (fastest) {
-          const gap = route.totalSeconds - fastest.totalSeconds;
-          gapText = `A non-accessible route would take ${fmtSeconds(fastest.totalSeconds)} — that's a gap of ${Math.max(0, Math.round(gap))}s. Help close it by keeping obstacle reports up to date.`;
-        }
-      }
-
-      let raceText = "";
-      if (accessible) {
-        const best = await getLeaderboardEntry(fromNode.id, toNode.id);
-        raceText = best
-          ? `Current accessible-route record for this path: ${fmtSeconds(best.bestSeconds)} by ${best.holder}. Think you can beat it? Log your attempt with log_attempt once you arrive.`
-          : `No accessible-route record set for this path yet — be the first! Log your attempt with log_attempt once you arrive.`;
-      }
-
-      const mapUrl = `${getBaseUrl()}/map?route=${route.nodeIds.join(",")}&accessible=${accessible}`;
-
+      const mapUrl = `${getBaseUrl()}/map?route=${route.nodeIds.join(",")}`;
       const stepsText = route.steps
         .map((s) => `- ${s.fromName} → ${s.toName} (${s.edge.type}, ${fmtSeconds(s.seconds)})`)
         .join("\n");
 
       return {
-        content: [
-          {
-            type: "text",
-            text:
-              `${accessible ? "Accessible" : "Fastest"} route from ${fromNode.name} to ${toNode.name}: ` +
-              `${fmtSeconds(route.totalSeconds)} over ${Math.round(route.totalMeters)}m.\n\n${stepsText}` +
-              (gapText ? `\n\n${gapText}` : "") +
-              (raceText ? `\n\n${raceText}` : "") +
-              `\n\nMap: ${mapUrl}`,
-          },
-        ],
+        content: [{
+          type: "text",
+          text: `Walking route from ${fromNode.name} to ${toNode.name}: ${fmtSeconds(route.totalSeconds)} over ${Math.round(route.totalMeters)}m.\n\n${stepsText}\n\nAccessibility has not been verified for this route.\n\nMap: ${mapUrl}`,
+        }],
         structuredContent: {
           from: fromNode.name,
           to: toNode.name,
-          accessible,
+          routeType: "ordinary-walking",
+          accessibilityVerified: false,
           totalSeconds: route.totalSeconds,
           totalMeters: route.totalMeters,
           nodeIds: route.nodeIds,
@@ -182,8 +149,8 @@ const handler = createMcpHandler((server) => {
   server.registerTool(
     "get_leaderboard",
     {
-      title: "Get accessible route leaderboard",
-      description: "Gets the fastest recorded accessible-route time between two points, if any.",
+      title: "Get walking-route leaderboard",
+      description: "Gets the fastest recorded walking-route time between two points, if any.",
       inputSchema: z.object({
         from: z.string(),
         to: z.string(),
@@ -213,9 +180,9 @@ const handler = createMcpHandler((server) => {
   server.registerTool(
     "log_attempt",
     {
-      title: "Log an accessible-route attempt",
+      title: "Log a walking-route attempt",
       description:
-        "Submits a completed accessible-route time between two points for the leaderboard/race feature.",
+        "Submits a completed walking-route time between two points for the leaderboard/race feature.",
       inputSchema: z.object({
         from: z.string(),
         to: z.string(),
