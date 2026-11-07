@@ -81,7 +81,7 @@ const handler = createMcpHandler((server) => {
     {
       title: "Report an obstacle",
       description:
-        "Reports that a path segment (e.g. an elevator or ramp) is currently blocked or has been fixed. Updates live routing immediately for everyone using the accessible route finder. Use this to keep information current instead of relying on outdated venue signage.",
+        "Reports that a path segment (e.g. an elevator or ramp) is currently blocked or has been fixed. Updates live routing immediately for everyone using the walking route finder. Use this to keep information current instead of relying on outdated venue signage.",
       inputSchema: z.object({
         location: z
           .string()
