@@ -32,7 +32,6 @@ interface GraphData {
 export default function MapView() {
   const params = useSearchParams();
   const routeParam = params.get("route");
-  const accessible = params.get("accessible") !== "false";
   const routeNodeIds = routeParam ? routeParam.split(",") : [];
 
   const [data, setData] = useState<GraphData | null>(null);
@@ -62,71 +61,94 @@ export default function MapView() {
   const height = Math.max(...nodes.map((n) => n.y)) + padding * 2;
 
   return (
-    <div style={{ fontFamily: "sans-serif", padding: 24 }}>
-      <h2 style={{ marginBottom: 4 }}>Salzburg Messe — {accessible ? "Accessible" : "Fastest"} route</h2>
+    <div style={{ fontFamily: "sans-serif", padding: 24, maxWidth: 1100, margin: "0 auto" }}>
+      <h1 style={{ marginBottom: 4 }}>Salzburg Messe — walking route prototype</h1>
       <p style={{ color: "#666", marginTop: 0 }}>
-        {routeNodeIds.length > 0
-          ? `${nodeById.get(routeNodeIds[0])?.name ?? routeNodeIds[0]} → ${
-              nodeById.get(routeNodeIds[routeNodeIds.length - 1])?.name ?? routeNodeIds[routeNodeIds.length - 1]
-            }`
-          : "No route selected"}
+        Ordinary walking route demo. Accessibility has not yet been assessed.
       </p>
-      <svg
-        viewBox={`0 0 ${width} ${height}`}
-        width="100%"
-        style={{ maxWidth: 960, background: "#fafafa", border: "1px solid #ddd", borderRadius: 8 }}
-      >
-        {edges.map((e) => {
-          const a = nodeById.get(e.from);
-          const b = nodeById.get(e.to);
-          if (!a || !b) return null;
-          const isOnRoute = routeEdgeKeys.has(`${e.from}|${e.to}`);
-          const isBlocked = obstacles[e.id]?.status === "blocked";
-          const stroke = isBlocked ? "#d33" : isOnRoute ? "#1a7f37" : "#bbb";
-          const strokeWidth = isOnRoute ? 5 : 2;
-          const dash = e.type === "stairs" || e.type === "elevator" ? "6,4" : undefined;
-          return (
-            <g key={e.id}>
-              <line
-                x1={a.x + padding}
-                y1={a.y + padding}
-                x2={b.x + padding}
-                y2={b.y + padding}
-                stroke={stroke}
-                strokeWidth={strokeWidth}
-                strokeDasharray={dash}
+
+      <section style={{ margin: "20px 0 28px" }}>
+        <h2 style={{ fontSize: 18, marginBottom: 8 }}>Venue floor plan</h2>
+        <div style={{ background: "#f4f4f2", border: "1px solid #ddd", borderRadius: 10, overflow: "auto", textAlign: "center" }}>
+          <img
+            src="/venue-floorplan-prototype.svg"
+            alt="Prototype floor plan of Salzburg Messe showing halls and selected points of interest"
+            style={{ display: "block", width: "100%", maxWidth: 620, height: "auto", margin: "0 auto" }}
+          />
+        </div>
+        <p style={{ color: "#777", fontSize: 12, lineHeight: 1.5 }}>
+          The floor plan is a visual reference only. The current demo routing graph is hand-authored and is not geographically aligned to this floor plan. Accessibility has not been assessed; do not rely on this prototype for step-free navigation.
+        </p>
+      </section>
+
+      <section>
+        <h2 style={{ fontSize: 18, marginBottom: 4 }}>
+          Demo routing graph — Walking mode
+        </h2>
+        <p style={{ color: "#666", marginTop: 0 }}>
+          {routeNodeIds.length > 0
+            ? `${nodeById.get(routeNodeIds[0])?.name ?? routeNodeIds[0]} → ${
+                nodeById.get(routeNodeIds[routeNodeIds.length - 1])?.name ?? routeNodeIds[routeNodeIds.length - 1]
+              }`
+            : "No route selected"}
+        </p>
+        <svg
+          viewBox={`0 0 ${width} ${height}`}
+          width="100%"
+          style={{ maxWidth: 960, background: "#fafafa", border: "1px solid #ddd", borderRadius: 8 }}
+        >
+          {edges.map((e) => {
+            const a = nodeById.get(e.from);
+            const b = nodeById.get(e.to);
+            if (!a || !b) return null;
+            const isOnRoute = routeEdgeKeys.has(`${e.from}|${e.to}`);
+            const isBlocked = obstacles[e.id]?.status === "blocked";
+            const stroke = isBlocked ? "#d33" : isOnRoute ? "#1a7f37" : "#bbb";
+            const strokeWidth = isOnRoute ? 5 : 2;
+            const dash = e.type === "stairs" || e.type === "elevator" ? "6,4" : undefined;
+            return (
+              <g key={e.id}>
+                <line
+                  x1={a.x + padding}
+                  y1={a.y + padding}
+                  x2={b.x + padding}
+                  y2={b.y + padding}
+                  stroke={stroke}
+                  strokeWidth={strokeWidth}
+                  strokeDasharray={dash}
+                />
+                {isBlocked && (
+                  <text
+                    x={(a.x + b.x) / 2 + padding}
+                    y={(a.y + b.y) / 2 + padding - 8}
+                    fontSize={11}
+                    fill="#d33"
+                    textAnchor="middle"
+                  >
+                    ⚠ blocked
+                  </text>
+                )}
+              </g>
+            );
+          })}
+          {nodes.map((n) => (
+            <g key={n.id}>
+              <circle
+                cx={n.x + padding}
+                cy={n.y + padding}
+                r={routeNodeIds.includes(n.id) ? 9 : 6}
+                fill={routeNodeIds.includes(n.id) ? "#1a7f37" : "#555"}
               />
-              {isBlocked && (
-                <text
-                  x={(a.x + b.x) / 2 + padding}
-                  y={(a.y + b.y) / 2 + padding - 8}
-                  fontSize={11}
-                  fill="#d33"
-                  textAnchor="middle"
-                >
-                  ⚠ blocked
-                </text>
-              )}
+              <text x={n.x + padding + 10} y={n.y + padding + 4} fontSize={12} fill="#222">
+                {n.name}
+              </text>
             </g>
-          );
-        })}
-        {nodes.map((n) => (
-          <g key={n.id}>
-            <circle
-              cx={n.x + padding}
-              cy={n.y + padding}
-              r={routeNodeIds.includes(n.id) ? 9 : 6}
-              fill={routeNodeIds.includes(n.id) ? "#1a7f37" : "#555"}
-            />
-            <text x={n.x + padding + 10} y={n.y + padding + 4} fontSize={12} fill="#222">
-              {n.name}
-            </text>
-          </g>
-        ))}
-      </svg>
-      <p style={{ color: "#888", fontSize: 13, marginTop: 12 }}>
-        Dashed lines are stairs/elevator segments. Red = reported obstacle. Green = your route.
-      </p>
+          ))}
+        </svg>
+        <p style={{ color: "#888", fontSize: 13, marginTop: 12 }}>
+          Red = reported obstacle. Green = selected demo route. Walking route only; accessibility unverified.
+        </p>
+      </section>
     </div>
   );
 }
