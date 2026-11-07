@@ -3,6 +3,7 @@ import { z } from "zod";
 import { NODES, EDGES, findNode, findEdge } from "@/lib/venue";
 import { computeRoute } from "@/lib/routing";
 import { getObstacles, setObstacle, getLeaderboardEntry, submitAttempt } from "@/lib/store";
+import { ROUTE_MAP_WIDGET_URI, ROUTE_MAP_WIDGET_HTML } from "@/lib/widget";
 
 function getBaseUrl() {
   if (process.env.APP_BASE_URL) return process.env.APP_BASE_URL;
@@ -16,61 +17,136 @@ function fmtSeconds(s: number) {
   return `${m}m ${sec}s`;
 }
 
+const ESTIMATE_DISCLAIMER =
+  "Prototype estimate: distances/times come from a hand-authored demo graph, not a verified accessibility survey. Report anything wrong with report_obstacle.";
+
 const handler = createMcpHandler((server) => {
+  server.registerResource(
+    "route-map-widget",
+    ROUTE_MAP_WIDGET_URI,
+    {},
+    async () => ({
+      contents: [
+        {
+          uri: ROUTE_MAP_WIDGET_URI,
+          mimeType: "text/html+skybridge",
+          text: ROUTE_MAP_WIDGET_HTML,
+        },
+      ],
+    })
+  );
+
   server.registerTool(
-    "find_walking_route",
+    "find_accessible_route",
     {
-      title: "Find walking route",
-      description: "Finds an ordinary walking route between two points inside the Salzburg Messe demo graph, avoiding currently reported blocked segments. Accessibility has not been assessed.",
+      title: "Find accessible route",
+      description:
+        "Finds a walking route between two points inside the Salzburg Messe (e.g. from an entrance to the TTF venue hall). In accessible mode (default) it avoids stairs and any currently reported obstacles for wheelchair/crutches users, and reports the time gap versus the fastest non-accessible route plus any leaderboard record to beat. This is a hackathon prototype estimate, not a verified accessibility survey.",
       inputSchema: z.object({
         from: z.string().describe("Starting point, e.g. 'Westeingang' or 'entrance_west'"),
         to: z.string().describe("Destination, e.g. 'Halle 2' or 'TTF venue'"),
+        accessible: z
+          .boolean()
+          .default(true)
+          .describe("Whether the route must avoid stairs and other non-wheelchair-accessible edges"),
       }),
+      _meta: {
+        ui: { resourceUri: ROUTE_MAP_WIDGET_URI },
+        "openai/outputTemplate": ROUTE_MAP_WIDGET_URI,
+        "openai/toolInvocation/invoking": "Finding your route…",
+        "openai/toolInvocation/invoked": "Route found",
+        "openai/widgetAccessible": true,
+      },
     },
-    async ({ from, to }) => {
+    async ({ from, to, accessible }) => {
       const fromNode = findNode(from);
       const toNode = findNode(to);
       if (!fromNode || !toNode) {
         return {
-          content: [{
-            type: "text",
-            text: `Could not resolve one of the locations. Known locations: ${NODES.map((n) => n.name).join(", ")}.`,
-          }],
+          content: [
+            {
+              type: "text",
+              text: `Could not resolve one of the locations. Known locations: ${NODES.map((n) => n.name).join(", ")}`,
+            },
+          ],
           isError: true,
         };
       }
 
       const obstacles = await getObstacles();
-      const route = computeRoute(fromNode.id, toNode.id, false, obstacles);
+      const route = computeRoute(fromNode.id, toNode.id, accessible, obstacles);
       if (!route) {
         return {
-          content: [{
-            type: "text",
-            text: `No walking route found between ${fromNode.name} and ${toNode.name} right now — it may be fully blocked by reported obstacles.`,
-          }],
+          content: [
+            {
+              type: "text",
+              text: `No ${accessible ? "accessible " : ""}route found between ${fromNode.name} and ${toNode.name} right now — it may be fully blocked by reported obstacles.`,
+            },
+          ],
           isError: true,
         };
       }
 
-      const mapUrl = `${getBaseUrl()}/map?route=${route.nodeIds.join(",")}`;
+      let gapText: string | undefined;
+      let gapSeconds: number | undefined;
+      let fastest: ReturnType<typeof computeRoute> | null = null;
+      if (accessible) {
+        fastest = computeRoute(fromNode.id, toNode.id, false, obstacles);
+        if (fastest) {
+          gapSeconds = Math.max(0, Math.round(route.totalSeconds - fastest.totalSeconds));
+          gapText = `A non-accessible route would take ${fmtSeconds(fastest.totalSeconds)} — a gap of ${gapSeconds}s. Help close it by keeping obstacle reports up to date.`;
+        }
+      }
+
+      let raceText: string | undefined;
+      let leaderboardEntry: Awaited<ReturnType<typeof getLeaderboardEntry>> = null;
+      if (accessible) {
+        leaderboardEntry = await getLeaderboardEntry(fromNode.id, toNode.id);
+        raceText = leaderboardEntry
+          ? `Current accessible-route record for this path: ${fmtSeconds(leaderboardEntry.bestSeconds)} by ${leaderboardEntry.holder}. Think you can beat it? Log your attempt with log_attempt once you arrive.`
+          : `No accessible-route record set for this path yet — be the first! Log your attempt with log_attempt once you arrive.`;
+      }
+
+      const mapUrl = `${getBaseUrl()}/map?route=${route.nodeIds.join(",")}&accessible=${accessible}`;
+
       const stepsText = route.steps
         .map((s) => `- ${s.fromName} → ${s.toName} (${s.edge.type}, ${fmtSeconds(s.seconds)})`)
         .join("\n");
 
       return {
-        content: [{
-          type: "text",
-          text: `Walking route from ${fromNode.name} to ${toNode.name}: ${fmtSeconds(route.totalSeconds)} over ${Math.round(route.totalMeters)}m.\n\n${stepsText}\n\nAccessibility has not been verified for this route.\n\nMap: ${mapUrl}`,
-        }],
+        content: [
+          {
+            type: "text",
+            text:
+              `${accessible ? "Accessible" : "Fastest"} route from ${fromNode.name} to ${toNode.name}: ` +
+              `${fmtSeconds(route.totalSeconds)} over ${Math.round(route.totalMeters)}m.\n\n${stepsText}` +
+              (gapText ? `\n\n${gapText}` : "") +
+              (raceText ? `\n\n${raceText}` : "") +
+              `\n\n${ESTIMATE_DISCLAIMER}` +
+              `\n\nMap: ${mapUrl}`,
+          },
+        ],
         structuredContent: {
           from: fromNode.name,
           to: toNode.name,
-          routeType: "ordinary-walking",
-          accessibilityVerified: false,
+          accessible,
           totalSeconds: route.totalSeconds,
           totalMeters: route.totalMeters,
           nodeIds: route.nodeIds,
           mapUrl,
+          gapSeconds,
+          leaderboard: leaderboardEntry,
+          disclaimer: ESTIMATE_DISCLAIMER,
+          // widget-ready payload (self-contained — no network call needed in the iframe)
+          nodes: NODES,
+          edges: EDGES,
+          obstacles,
+          routeNodeIds: route.nodeIds,
+          fromName: fromNode.name,
+          toName: toNode.name,
+          totalTimeLabel: fmtSeconds(route.totalSeconds),
+          gapLabel: gapText,
+          raceLabel: raceText,
         },
       };
     }
@@ -81,7 +157,7 @@ const handler = createMcpHandler((server) => {
     {
       title: "Report an obstacle",
       description:
-        "Reports that a path segment (e.g. an elevator or ramp) is currently blocked or has been fixed. Updates live routing immediately for everyone using the walking route finder. Use this to keep information current instead of relying on outdated venue signage.",
+        "Reports that a path segment (e.g. an elevator or ramp) is currently blocked or has been fixed. Updates live routing immediately for everyone using the accessible route finder. Use this to keep information current instead of relying on outdated venue signage.",
       inputSchema: z.object({
         location: z
           .string()
@@ -149,8 +225,8 @@ const handler = createMcpHandler((server) => {
   server.registerTool(
     "get_leaderboard",
     {
-      title: "Get walking-route leaderboard",
-      description: "Gets the fastest recorded walking-route time between two points, if any.",
+      title: "Get accessible route leaderboard",
+      description: "Gets the fastest recorded accessible-route time between two points, if any.",
       inputSchema: z.object({
         from: z.string(),
         to: z.string(),
@@ -180,9 +256,9 @@ const handler = createMcpHandler((server) => {
   server.registerTool(
     "log_attempt",
     {
-      title: "Log a walking-route attempt",
+      title: "Log an accessible-route attempt",
       description:
-        "Submits a completed walking-route time between two points for the leaderboard/race feature.",
+        "Submits a completed accessible-route time between two points for the leaderboard/race feature.",
       inputSchema: z.object({
         from: z.string(),
         to: z.string(),

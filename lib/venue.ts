@@ -24,8 +24,8 @@ export interface VenueEdge {
 }
 
 export const NODES: VenueNode[] = [
-  { id: "entrance_west", name: "Westeingang", x: 0, y: 200 },
-  { id: "entrance_east", name: "Osteingang", x: 800, y: 200 },
+  { id: "entrance_west", name: "Westeingang (West Entrance)", x: 0, y: 200 },
+  { id: "entrance_east", name: "Osteingang (East Entrance)", x: 800, y: 200 },
   { id: "foyer", name: "Foyer", x: 200, y: 200 },
   { id: "halle1", name: "Halle 1", x: 350, y: 80 },
   { id: "halle2", name: "Halle 2 (TTF Venue)", x: 500, y: 80 },
@@ -35,6 +35,10 @@ export const NODES: VenueNode[] = [
   { id: "corridor_north", name: "Nordgang", x: 500, y: 150 },
   { id: "corridor_south", name: "Südgang", x: 500, y: 250 },
   { id: "stairs_landing", name: "Treppenpodest", x: 420, y: 150 },
+
+  // Event-specific points of interest (exhibitor/food stands etc.) — these don't exist
+  // in base venue geodata and need to be added/updated per event, same spirit as obstacles.
+  { id: "icecream_stand", name: "Eisstand (Ice Cream Stand)", x: 150, y: 260 },
 ];
 
 export const EDGES: VenueEdge[] = [
@@ -59,16 +63,45 @@ export const EDGES: VenueEdge[] = [
   { id: "e13", from: "corridor_south", to: "corridor_north", distanceMeters: 50, type: "ramp", wheelchairOk: true },
 
   { id: "e14", from: "halle4", to: "halle5", distanceMeters: 150, type: "walk", wheelchairOk: true },
+
+  { id: "e15", from: "foyer", to: "icecream_stand", distanceMeters: 25, type: "walk", wheelchairOk: true },
 ];
 
 export const AVG_WALK_SPEED_MPS = 1.3; // ~4.7 km/h, roughly average walking pace
 export const AVG_WHEELCHAIR_SPEED_MPS = 1.0; // slightly slower average for a wheelchair/crutches user
 
+function words(s: string): string[] {
+  return s
+    .toLowerCase()
+    .split(/[^a-z0-9äöüß]+/)
+    .filter((w) => w.length > 1);
+}
+
+// Resolves a location loosely — e.g. "entrance" or "ice cream food stand" should still
+// find "Westeingang (West Entrance)" / "Eisstand (Ice Cream Stand)" even though the words
+// aren't in the same order or don't form an exact substring. Ties (score equal) keep the
+// first-listed node, which is deliberate: a bare "entrance" resolves to the main west one.
 export function findNode(idOrName: string): VenueNode | undefined {
   const q = idOrName.trim().toLowerCase();
-  return NODES.find(
-    (n) => n.id.toLowerCase() === q || n.name.toLowerCase() === q || n.name.toLowerCase().includes(q)
-  );
+  if (!q) return undefined;
+
+  const exact = NODES.find((n) => n.id.toLowerCase() === q || n.name.toLowerCase() === q);
+  if (exact) return exact;
+
+  const queryWords = words(q);
+  if (queryWords.length === 0) return undefined;
+
+  let best: VenueNode | undefined;
+  let bestScore = 0;
+  for (const n of NODES) {
+    const nameWords = new Set(words(n.name));
+    const score = queryWords.filter((w) => nameWords.has(w)).length;
+    if (score > bestScore) {
+      bestScore = score;
+      best = n;
+    }
+  }
+  return best;
 }
 
 // Resolve only exact IDs or descriptions that identify exactly one edge.

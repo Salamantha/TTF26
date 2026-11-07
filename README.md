@@ -1,17 +1,24 @@
 # TTF Accessible Route Finder — MCP server
 
-An MCP server prototype that finds ordinary walking routes inside the Salzburg Messe demo graph, lets users report blocked segments, and records route times. Accessibility is deliberately out of scope for this first running prototype.
+An MCP server that finds accessible (wheelchair/crutches-aware) walking routes inside
+the Salzburg Messe, compares them against the fastest non-accessible route to surface
+the time gap, lets anyone report obstacles live, and tracks a leaderboard so people can
+"race" that gap toward zero. Route estimates are a hackathon prototype, not a verified
+accessibility survey — see the disclaimer baked into every `find_accessible_route` response.
 
 ## What's here
 
-- `app/api/mcp/route.ts` — the MCP server (5 tools, see below)
-- `lib/venue.ts` — the venue graph (nodes/edges). **Mocked for the demo** — swap this out
-  for validated floorplan-derived routing data when available.
-- `lib/routing.ts` — Dijkstra shortest path, using ordinary walking edges only
+- `app/api/mcp/route.ts` — the MCP server (5 tools, see below) plus the `ui://widget/route-map.html`
+  resource used by the ChatGPT Apps SDK inline widget
+- `lib/venue.ts` — the venue graph (nodes/edges) with fuzzy name matching (`findNode`/`findEdge`).
+  **Mocked for the demo** — swap this out for validated floorplan-derived routing data when available.
+- `lib/routing.ts` — Dijkstra shortest path, with an accessible-mode filter
 - `lib/store.ts` — obstacle state + leaderboard. In-memory by default; set the Upstash
   env vars below to persist across cold starts during the live demo.
-- `app/map` + `app/api/venue-graph` — map page with a prototype venue-floorplan reference
-  and the current demo routing graph.
+- `lib/widget.ts` — the self-contained HTML/JS for the inline ChatGPT widget (reads the
+  whole route+graph from `structuredContent`, no network call from the iframe)
+- `app/map` + `app/api/venue-graph` — a standalone map page (SVG route graph next to the
+  real venue floor-plan reference) for clients that don't render the inline widget
 
 ## Venue floor-plan prototype
 
@@ -21,9 +28,10 @@ generation project: hall outlines and labels, rendered as a static SVG at
 
 **Prototype limitations — do not treat this as live navigation yet:**
 
-- The floor-plan image and the route graph are shown separately. The existing route
-  graph is still hand-authored and is not spatially aligned to the floor-plan geometry.
-- The current route graph is still a hand-authored demo graph and is not spatially aligned with the floor-plan reference. Accessibility has not been assessed and must not be inferred from route results.
+- The floor-plan image and the route graph are shown separately — the route graph is
+  still hand-authored and not spatially aligned to the floor-plan geometry.
+- Route times/distances are a hand-authored demo estimate, not a verified accessibility
+  survey (see the disclaimer `find_accessible_route` returns on every call).
 - The supplied source is a single-floor dataset. It is not sufficient for multi-floor
   navigation.
 - Reuse is prototype-only and subject to the venue/data provider's terms. Confirm
@@ -36,11 +44,28 @@ Next integration step: replace the hand-authored demo graph with the supplied fl
 
 | Tool | Purpose |
 |---|---|
-| `find_walking_route` | Route between two named points, ordinary walking, with obstacle-aware rerouting, the route time, and a map link |
+| `find_accessible_route` | Route between two named points, accessible or fastest, with obstacle-aware rerouting, the accessible-vs-fastest time gap, a map link, and (in ChatGPT) an inline rendered map widget |
 | `report_obstacle` | Mark a segment (elevator/ramp/etc.) blocked or clear — rerouting updates immediately |
 | `list_obstacles` | See everything currently reported blocked |
-| `get_leaderboard` | Best recorded walking-route time for a path |
+| `get_leaderboard` | Best recorded accessible-route time for a path |
 | `log_attempt` | Submit a completed time for the leaderboard/"race" mechanic |
+
+## The inline ChatGPT widget
+
+`find_accessible_route`'s tool descriptor sets `_meta["openai/outputTemplate"]` (and the
+MCP-Apps-standard `_meta.ui.resourceUri`) to `ui://widget/route-map.html`, a resource
+registered alongside the tools. In a ChatGPT client that supports the Apps SDK, this
+renders the route directly inside the chat bubble instead of requiring a click-through
+to `/map`. The widget is fully self-contained — the tool's `structuredContent` carries
+the whole venue graph, the obstacle list, and the route, so the sandboxed widget iframe
+never needs to fetch anything.
+
+The exact mechanism ChatGPT uses to deliver tool output to the widget is inconsistently
+documented across sources at the time of writing, so `lib/widget.ts` listens for all of
+them defensively (`window.openai.toolOutput` read directly, the `openai:set_globals`
+event, the raw `ui/notifications/tool-result` postMessage, and a short poll as a last
+resort). If the widget doesn't render in your ChatGPT build, the tool's text response
+still includes a `/map` link as a fallback — the demo doesn't depend on the widget working.
 
 ## Run locally
 
