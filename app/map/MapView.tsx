@@ -32,7 +32,6 @@ interface GraphData {
 export default function MapView() {
   const params = useSearchParams();
   const routeParam = params.get("route");
-  const accessible = params.get("accessible") !== "false";
   const routeNodeIds = routeParam ? routeParam.split(",") : [];
 
   const [data, setData] = useState<GraphData | null>(null);
@@ -63,9 +62,9 @@ export default function MapView() {
 
   return (
     <div style={{ fontFamily: "sans-serif", padding: 24, maxWidth: 1100, margin: "0 auto" }}>
-      <h1 style={{ marginBottom: 4 }}>Salzburg Messe — venue map</h1>
+      <h1 style={{ marginBottom: 4 }}>Salzburg Messe — walking route prototype</h1>
       <p style={{ color: "#666", marginTop: 0 }}>
-        Prototype preview using the supplied venue floor-plan geometry.
+        Ordinary walking route demo. Accessibility has not yet been assessed.
       </p>
 
       <section style={{ margin: "20px 0 28px" }}>
@@ -78,15 +77,13 @@ export default function MapView() {
           />
         </div>
         <p style={{ color: "#777", fontSize: 12, lineHeight: 1.5 }}>
-          Reference floor plan only. The route graph below is still the hand-authored demo graph
-          and is not geographically aligned to this floor plan. Accessibility and step-free
-          connections in the supplied source data have not yet been independently verified.
+          The floor plan is a visual reference only. The current demo routing graph is hand-authored and is not geographically aligned to this floor plan. Accessibility has not been assessed; do not rely on this prototype for step-free navigation.
         </p>
       </section>
 
       <section>
         <h2 style={{ fontSize: 18, marginBottom: 4 }}>
-          Demo routing graph — {accessible ? "Accessible mode" : "Fastest mode"}
+          Demo routing graph — Walking mode
         </h2>
         <p style={{ color: "#666", marginTop: 0 }}>
           {routeNodeIds.length > 0
@@ -149,7 +146,7 @@ export default function MapView() {
           ))}
         </svg>
         <p style={{ color: "#888", fontSize: 13, marginTop: 12 }}>
-          Dashed lines are stairs/elevator segments. Red = reported obstacle. Green = selected demo route.
+          Red = reported obstacle. Green = selected demo route. Walking route only; accessibility unverified.
         </p>
       </section>
     </div>
