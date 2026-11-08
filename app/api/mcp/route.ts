@@ -77,6 +77,7 @@ const handler = createMcpHandler((server) => {
       annotations: { readOnlyHint: true },
       _meta: {
         ui: { resourceUri: ROUTE_MAP_WIDGET_URI },
+        "openai/ui": { entrypoints: [{ type: "global" }] },
         "openai/outputTemplate": ROUTE_MAP_WIDGET_URI,
         "openai/toolInvocation/invoking": "Planning your route…",
         "openai/toolInvocation/invoked": "Route ready",
