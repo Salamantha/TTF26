@@ -944,6 +944,7 @@ function start() {
 
   function enterNav(d: RouteData) {
     setMode("nav");
+    $("ttf-nav-next").after($("ttf-q")); // finish() may have moved it to the finish card
     renderNav(d);
     stopTick();
     if (state.run?.timed) {
@@ -1089,8 +1090,12 @@ function start() {
   /** Targeted question right after a stairs/lift part: one tap, answered into routing for everyone. */
   function ask(d: RouteData, part: RouteData["parts"][number]) {
     const q = $("ttf-q");
+    // Keep an unanswered question until a new one replaces it, so tapping Next quickly doesn't lose it.
+    if (part.kind === "walk" || !part.placeName) {
+      if (!q.querySelector("button:not(:disabled)")) q.replaceChildren();
+      return;
+    }
     q.replaceChildren();
-    if (part.kind === "walk" || !part.placeName) return;
     const name = part.placeName;
     el("span", "", `Was ${name} ${part.kind === "lift" ? "working" : "passable"}?`, q);
     const yes = el("button", "", "Yes", q),
@@ -1163,9 +1168,15 @@ function start() {
     const card = $("ttf-finish");
     card.replaceChildren();
     modeBadge(d.mobility, el("div", "mode-row", undefined, card));
+    // An unanswered lift/stairs question (e.g. the lift was the last step) stays answerable here.
+    const q = $("ttf-q");
+    const keepQ = () => {
+      if (q.querySelector("button:not(:disabled)")) card.append(q);
+    };
 
     if (!run.timed) {
       el("div", "gap-q", `You've arrived at ${d.toName}.`, card);
+      keepQ();
       thankYou(card, d, run);
       doneButtons(card, d);
       return;
@@ -1173,13 +1184,7 @@ function start() {
 
     const total = Math.round(Object.values(run.splits).reduce((a, b) => a + b, 0));
     const fastest = run.originFastest ?? d.compare.fastest?.seconds ?? null;
-    if (fastest && total < fastest * 0.4) {
-      el("div", "gap-q", `${clock(total)}: too fast to count`, card);
-      el("div", "muted", "Tap Next as you finish each part of the route.", card);
-      thankYou(card, d, run);
-      doneButtons(card, d);
-      return;
-    }
+    keepQ();
     const head = el("div", "gap-head", undefined, card);
     const vsStairs = fastest !== null ? total - fastest : null;
     el("span", vsStairs !== null && vsStairs <= 0 ? "gap-big zero" : "gap-big", clock(total), head);

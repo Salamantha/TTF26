@@ -16,7 +16,6 @@ function getBaseUrl() {
 
 const text = (t: string) => ({ type: "text" as const, text: t });
 const OBSTACLE_RADIUS_M = 4;
-const MIN_PLAUSIBLE_SHARE = 0.4;
 const mobilitySchema = z.enum(["walk", "cane", "wheelchair"]);
 const WIDGET_NOTE =
   "The widget already shows the map, the route parts and the timer. In your reply, summarize the accessibility gap in one or two short sentences (how much longer the step-free route is and which stairs/lift cause it), then invite the user to try closing the gap with the timer in the widget. Don't list directions.";
@@ -332,14 +331,6 @@ The widget shows each obstacle as a card with who it affects and a map. Reply wi
       const a = findPlace(from),
         b = findPlace(to);
       if (!a || !b) return { content: [text("Couldn't resolve one of the places. Try search_places.")], isError: true };
-      // Reject times nobody can walk (e.g. Start and Arrived tapped right after each other).
-      const plan = await planRoute({ from, to, mobility: "walk", avoidCrowds: false });
-      const planned = plan.ok ? plan.data.compare.fastest?.seconds ?? null : null;
-      // A normal result, not isError: ChatGPT turns tool errors into exceptions in the widget.
-      if (planned && seconds < planned * MIN_PLAUSIBLE_SHARE) {
-        const reason = `${fmtSeconds(seconds)} is faster than anyone can walk this route (about ${fmtSeconds(planned)} at normal pace), so it wasn't saved.`;
-        return { content: [text(reason)], structuredContent: { saved: false, reason, minSeconds: Math.ceil(planned * MIN_PLAUSIBLE_SHARE) } };
-      }
       const r = await submitAttempt(a.id, b.id, mobility, Math.round(seconds), holder.trim(), splits);
       const msg = r.isNewRecord
         ? `New record for ${a.name} → ${b.name} (${MOBILITY[mobility].label}): ${holder} in ${fmtSeconds(seconds)}!`

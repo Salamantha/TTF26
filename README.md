@@ -60,7 +60,7 @@ other stands in the same category.
 | `report_deviation` | Someone left the planned route: which part, why (shorter / blocked / more accessible / lost), where they are; stored in `ttf_deviations` for organisers |
 | `clear_obstacle` | Mark an obstacle (by id, incl. map-marked areas) as resolved; the "Cleared" button in the obstacles widget |
 | `get_leaderboard` | Fastest times for a route and profile |
-| `log_attempt` | Submit a race time with optional per-part splits; faster ones replace the record, implausible ones (< 40 % of the walking time) aren't saved |
+| `log_attempt` | Submit a race time with optional per-part splits; faster ones replace the record (no minimum time) |
 | `mark_obstacle_area` | Save an obstacle at a point on the map (orange area, radius in m, floor) that routing avoids |
 
 ## Demo script
