@@ -217,8 +217,9 @@ export async function planRoute(input: PlanInput) {
       ok: false as const,
       error:
         `No ${mobility === "walk" ? "" : "step-free "}route from ${from.name} to ${to.name} right now.` +
-        (blockers ? ` Reported obstacles: ${blockers}.` : "") +
-        (mobility !== "walk" && fastest ? " A route with stairs exists." : ""),
+        // One fact per line: the widget shows these lines except the (possibly long) obstacle list.
+        (mobility !== "walk" && fastest ? "\nA route with stairs exists." : "") +
+        (blockers ? `\nReported obstacles: ${blockers}.` : ""),
     };
   }
 

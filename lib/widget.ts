@@ -6,7 +6,7 @@ import { CONNECTORS, OG_AREAS, OG_TABLES, OG_ELEVATION, OG_ROOM_H } from "./og";
 import { WIDGET_JS } from "./widget-bundle.generated";
 import { NEWT_PNG, FOOT_MASK, THEME_VARS, THEME_VARS_DARK, BRAND_CSS } from "./brand";
 
-export const ROUTE_MAP_WIDGET_URI = "ui://widget/route-map-3d-v6.html";
+export const ROUTE_MAP_WIDGET_URI = "ui://widget/route-map-3d-v7.html";
 
 // Approximate outer hall heights in metres, from team-05's Map3D.
 const HALL_HEIGHTS: Record<string, number> = {

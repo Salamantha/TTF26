@@ -741,16 +741,24 @@ function start() {
     } catch {}
     return raw.length > 200 ? "Something went wrong. Please try again." : raw;
   };
+  // Our own error texts put one fact per line (escaped as "\n" inside ChatGPT's exception text); drop the
+  // possibly long obstacle list so the message stays short.
+  const brief = (s: string) =>
+    s
+      .split(/\\n|\n/)
+      .filter((l) => !l.startsWith("Reported obstacles"))
+      .join(" ")
+      .trim();
   const canCall = !!window.openai?.callTool;
   const call = async (name: string, args: Record<string, unknown>) => {
     let r: ToolResult;
     try {
       r = await window.openai!.callTool!(name, args);
     } catch (e) {
-      throw new Error(readable(String((e as Error)?.message ?? e)));
+      throw new Error(brief(readable(String((e as Error)?.message ?? e))));
     }
     const msg = r?.content?.find((c) => c.type === "text")?.text ?? "";
-    if (r?.isError) throw new Error(readable(msg) || "Something went wrong.");
+    if (r?.isError) throw new Error(readable(brief(msg)) || "Something went wrong.");
     return { msg, data: r?.structuredContent as Record<string, unknown> | undefined };
   };
 
@@ -1396,6 +1404,9 @@ function start() {
       if (!marker) return toast(cfg.tap);
       save.disabled = true;
       const affects = wc.checked ? "wheelchair" : "everyone";
+      // Done with the form: close it right away (it comes back only if saving fails).
+      card.hidden = true;
+      toast("Saving…");
       try {
         if (kind === "deviate") {
           const origin = state.run?.origin ?? d.query;
@@ -1443,6 +1454,7 @@ function start() {
         }
       } catch (err) {
         toast((err as Error).message);
+        card.hidden = false;
         save.disabled = false;
       }
     };
@@ -1450,6 +1462,45 @@ function start() {
     if (kind === "report") what.focus();
   }
   $("ttf-report-btn").onclick = () => last && openPanel("report", last, null);
+
+  // ---------------------------------------------------------------- live obstacles
+
+  // Every 20 s (and when the widget becomes visible again) fetch the current obstacles. New or cleared ones are
+  // drawn right away; on the overview the route is re-planned around them, during navigation a new obstacle on
+  // the remaining route triggers a hint.
+  type ObstacleCard = { id: string; title: string; where: string; affects: "everyone" | "wheelchair"; p: Pt; radius: number; level: 0 | 1 };
+  let obstBusy = false;
+  async function refreshObstacles() {
+    const d = last;
+    if (!d || !canCall || obstBusy || busy || mode === "finish" || document.visibilityState === "hidden") return;
+    obstBusy = true;
+    try {
+      const { data } = await call("list_obstacles", {});
+      const cards = (data?.obstacles ?? []) as ObstacleCard[];
+      if (d !== last) return; // the route changed meanwhile
+      const before = new Set(d.obstacles.map((o) => o.id));
+      if (cards.length === before.size && cards.every((c) => before.has(c.id))) return;
+      const added = cards.filter((c) => !before.has(c.id));
+      d.obstacles = cards.map((c) => ({ id: c.id, p: c.p, label: c.where ? `${c.title} – ${c.where}` : c.title, affects: c.affects, radius: c.radius, level: c.level }));
+      lastJson = JSON.stringify(d);
+      drawObstacles(d.obstacles);
+      if (mode === "overview") {
+        replan({});
+      } else if (mode === "nav" && state.run) {
+        const ahead = d.parts.slice(state.run.idx);
+        const hit = added.find((c) =>
+          ahead.some((p) => (p.level === "og" ? 1 : 0) === c.level && p.points.some(([x, y]) => Math.hypot(x - c.p[0], y - c.p[1]) <= c.radius + 1.5))
+        );
+        if (hit) toast(`New obstacle on your route: ${hit.title}. Tap ⚠ Blocked to find another way.`);
+      }
+    } catch {
+      // Live updates are best effort; the next try comes in 20 s.
+    } finally {
+      obstBusy = false;
+    }
+  }
+  setInterval(refreshObstacles, 20000);
+  document.addEventListener("visibilitychange", () => document.visibilityState === "visible" && refreshObstacles());
 
   // ---------------------------------------------------------------- data in
 

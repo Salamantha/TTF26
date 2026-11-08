@@ -3,7 +3,7 @@
 import { VENUE, OG } from "./venue";
 import { NEWT_PNG, THEME_VARS, THEME_VARS_DARK, BRAND_CSS } from "./brand";
 
-export const OBSTACLES_WIDGET_URI = "ui://widget/obstacles-v2.html";
+export const OBSTACLES_WIDGET_URI = "ui://widget/obstacles-v3.html";
 
 const base = {
   halls: VENUE.halls.filter((h) => h.poly && h.poly.length > 2).map((h) => h.poly),
@@ -157,19 +157,42 @@ const SCRIPT = `
     render();
   }
   var current = function () { try { return window.openai && window.openai.toolOutput; } catch (e) { return null; } };
-  show(current());
+  // ChatGPT can re-deliver the original tool output later; only a different one from the host may replace a
+  // live-updated list (otherwise a re-delivery would bring back obstacles that were cleared meanwhile).
+  var hostJson = "";
+  function fromHost(d) {
+    if (!d || !d.obstacles) return;
+    var json = JSON.stringify(d);
+    if (json === hostJson) return;
+    hostJson = json;
+    show(d);
+  }
+  fromHost(current());
   window.addEventListener("openai:set_globals", function (e) {
     var g = e && e.detail && e.detail.globals;
-    show(g && g.toolOutput ? g.toolOutput : current());
+    fromHost(g && g.toolOutput ? g.toolOutput : current());
   });
   window.addEventListener("message", function (e) {
     var m = e.data;
-    if (m && m.jsonrpc === "2.0" && m.method === "ui/notifications/tool-result" && m.params) show(m.params.structuredContent || m.params);
+    if (m && m.jsonrpc === "2.0" && m.method === "ui/notifications/tool-result" && m.params) fromHost(m.params.structuredContent || m.params);
   });
   var tries = 0, poll = setInterval(function () {
     var d = current();
-    if (d || ++tries > 40) { clearInterval(poll); show(d); }
+    if (d || ++tries > 40) { clearInterval(poll); fromHost(d); }
   }, 250);
+
+  // Live updates: re-check every 20 s while visible, so new reports and cleared obstacles show up by themselves.
+  var refreshing = false;
+  function refresh() {
+    if (!canCall || refreshing || document.visibilityState === "hidden") return;
+    refreshing = true;
+    window.openai.callTool("list_obstacles", {}).then(function (r) {
+      var sc = r && r.structuredContent;
+      if (sc && sc.obstacles) show(sc);
+    }).catch(function () {}).then(function () { refreshing = false; });
+  }
+  setInterval(refresh, 20000);
+  document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible") refresh(); });
 })();
 `;
 
