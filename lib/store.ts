@@ -12,6 +12,9 @@ export interface ObstacleRecord {
   affects: "everyone" | "wheelchair";
   status: "blocked" | "clear";
   note?: string;
+  /** obstacle areas marked on the map: radius in metres and floor (0 = ground floor, 1 = 1. OG) */
+  radius?: number;
+  level?: 0 | 1;
   reportedAt: string;
 }
 
@@ -34,6 +37,7 @@ const SCHEMA = [
   `create table if not exists ttf_confirmations (place_id text primary key, confirmed_at timestamptz not null)`,
   `create table if not exists ttf_attempts (id bigserial primary key, route_key text not null, holder text not null, seconds integer not null, recorded_at timestamptz not null default now())`,
   `create index if not exists ttf_attempts_route_seconds on ttf_attempts (route_key, seconds)`,
+  `alter table ttf_attempts add column if not exists splits jsonb`,
 ];
 let ready: Promise<void> | null = null;
 
@@ -55,6 +59,7 @@ const mem = {
   obstacles: new Map<string, ObstacleRecord>(),
   confirm: new Map<string, string>(),
   attempts: new Map<string, Attempt[]>(),
+  splits: new Map<string, Record<string, number>[]>(),
 };
 
 export async function getObstacles(): Promise<Record<string, ObstacleRecord>> {
@@ -115,19 +120,34 @@ export async function getLeaderboard(fromId: string, toId: string, mobility: Mob
   return rows.map((r) => ({ holder: r.holder, seconds: Number(r.seconds), recordedAt: iso(r.recorded_at) }));
 }
 
-export async function submitAttempt(fromId: string, toId: string, mobility: Mobility, seconds: number, holder: string) {
+/** Best ("gold") split per route part id over all attempts, as in speedruns. */
+export async function getBestSplits(fromId: string, toId: string, mobility: Mobility): Promise<Record<string, number>> {
   const key = routeKey(fromId, toId, mobility);
+  const q = await db();
+  const all: Record<string, number>[] = q
+    ? (await q.query(`select splits from ttf_attempts where route_key = $1 and splits is not null`, [key])).map((r) => r.splits)
+    : mem.splits.get(key) ?? [];
+  const best: Record<string, number> = {};
+  for (const s of all) for (const [id, sec] of Object.entries(s)) if (!(id in best) || sec < best[id]) best[id] = sec;
+  return best;
+}
+
+export async function submitAttempt(fromId: string, toId: string, mobility: Mobility, seconds: number, holder: string, splits?: Record<string, number>) {
+  const key = routeKey(fromId, toId, mobility);
+  const goldBefore = splits ? await getBestSplits(fromId, toId, mobility) : {};
   const before = (await getLeaderboard(fromId, toId, mobility, 1))[0] ?? null;
   const q = await db();
   let rank: number;
   if (q) {
-    await q.query(`insert into ttf_attempts (route_key, holder, seconds) values ($1, $2, $3)`, [key, holder, seconds]);
+    await q.query(`insert into ttf_attempts (route_key, holder, seconds, splits) values ($1, $2, $3, $4)`, [key, holder, seconds, splits ? JSON.stringify(splits) : null]);
     const [{ n }] = await q.query(`select count(*)::int as n from ttf_attempts where route_key = $1 and seconds < $2`, [key, seconds]);
     rank = Number(n) + 1;
   } else {
     const list = [...(mem.attempts.get(key) ?? []), { holder, seconds, recordedAt: new Date().toISOString() }].sort((a, b) => a.seconds - b.seconds);
     mem.attempts.set(key, list);
+    if (splits) mem.splits.set(key, [...(mem.splits.get(key) ?? []), splits]);
     rank = list.filter((a) => a.seconds < seconds).length + 1;
   }
-  return { isNewRecord: !before || seconds < before.seconds, previousRecord: before, rank, top: await getLeaderboard(fromId, toId, mobility) };
+  const goldSplits = splits ? Object.keys(splits).filter((id) => !(id in goldBefore) || splits[id] < goldBefore[id]) : [];
+  return { isNewRecord: !before || seconds < before.seconds, previousRecord: before, rank, goldSplits, top: await getLeaderboard(fromId, toId, mobility) };
 }

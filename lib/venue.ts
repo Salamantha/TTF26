@@ -72,6 +72,25 @@ export function crowdFactors(t: number, space: number) {
   return out;
 }
 
+function inside([x, y]: Pt, poly: Pt[]) {
+  let c = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i],
+      [xj, yj] = poly[j];
+    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) c = !c;
+  }
+  return c;
+}
+
+const OG_ROOMS = OG_AREAS.filter((a) => a.kind === "room" || a.kind === "lobby");
+
+/** Name of the hall / foyer / 1. OG room a point lies in, for naming route parts. */
+export function areaAt(p: Pt, level: "eg" | "og"): string {
+  if (level === "og") return OG_ROOMS.find((a) => inside(p, a.poly))?.name ?? "1. OG corridor";
+  const h = VENUE.halls.find((h) => h.poly && inside(p, h.poly));
+  return h ? h.name ?? "Salzburgarena" : "outside";
+}
+
 function centroid(poly: Pt[]): Pt {
   return [poly.reduce((a, p) => a + p[0], 0) / poly.length, poly.reduce((a, p) => a + p[1], 0) / poly.length];
 }

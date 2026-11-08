@@ -1,6 +1,6 @@
 import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
-import { ROUTER, findPlace, suggestPlaces, EXAMPLE_PLACES } from "@/lib/venue";
+import { ROUTER, findPlace, suggestPlaces, levelOf, areaAt, EXAMPLE_PLACES } from "@/lib/venue";
 import { planRoute, fmtSeconds, MOBILITY } from "@/lib/plan";
 import { getObstacles, setObstacle, getLeaderboard, submitAttempt, PERSISTENT } from "@/lib/store";
 import { ROUTE_MAP_WIDGET_URI, ROUTE_MAP_WIDGET_HTML } from "@/lib/widget";
@@ -17,7 +17,7 @@ const OBSTACLE_RADIUS_M = 4;
 const MIN_PLAUSIBLE_SHARE = 0.4;
 const mobilitySchema = z.enum(["walk", "cane", "wheelchair"]);
 const WIDGET_NOTE =
-  "The map widget shows the route, directions, the fastest vs step-free comparison, the record and feedback buttons. Reply in at most two short sentences and don't repeat the directions or numbers.";
+  "The widget already shows the map, the route parts and the timer. In your reply, summarize the accessibility gap in one or two short sentences (how much longer the step-free route is and which stairs/lift cause it), then invite the user to try closing the gap with the timer in the widget. Don't list directions.";
 
 const handler = createMcpHandler((server) => {
   server.registerResource(
@@ -26,7 +26,7 @@ const handler = createMcpHandler((server) => {
     {
       _meta: {
         "openai/widgetDescription":
-          "Interactive 3D venue map with the route, a fastest vs step-free comparison, the route record with a race timer, feedback questions about lifts and obstacles, stand details and collapsible directions. Everything important is already visible; keep the chat reply short.",
+          "Interactive 3D venue map with the route, a visual fastest vs step-free gap, a 'close the gap' timer that turns into step-by-step navigation with split times, obstacle reporting on a 2D map, and a collapsed leaderboard. Keep the chat reply to a short summary of the gap.",
       },
     },
     async () => ({
@@ -71,6 +71,8 @@ const handler = createMcpHandler((server) => {
       const c = d.compare;
       const summary = [
         `${d.mobilityLabel} route ${d.fromName} → ${d.toName}: ${d.timeLabel}, ${d.distanceLabel}${d.via.length ? `, via ${d.via.join(", ")}` : ""}.`,
+        `Route parts: ${d.parts.map((p) => (p.kind === "walk" ? `${p.title} (${p.meters} m)` : p.title)).join(" → ")}.`,
+        d.obstacles.length ? `Reported obstacles: ${d.obstacles.map((o) => o.label).join("; ")}.` : "",
         c.fastest && c.stepFree
           ? `Fastest (stairs ok) ${c.fastest.label} vs step-free ${c.stepFree.label}${c.gapSeconds ? `: the step-free detour costs ${c.gapSeconds} s` : ": no detour"}.`
           : "",
@@ -146,6 +148,49 @@ const handler = createMcpHandler((server) => {
   );
 
   server.registerTool(
+    "mark_obstacle_area",
+    {
+      title: "Mark an obstacle area on the map",
+      description:
+        "Saves an obstacle at a point picked on the venue map (from the widget's 2D map): an area of the given radius that routing avoids, shown orange on the map. Use affects='wheelchair' if only people who can't take steps are stopped by it.",
+      inputSchema: z.object({
+        x: z.number().describe("Map x in metres (venue plan coordinates)"),
+        y: z.number().describe("Map y in metres (venue plan coordinates)"),
+        level: z.union([z.literal(0), z.literal(1)]).default(0).describe("0 = ground floor, 1 = 1. OG of Foyer 10"),
+        description: z.string().min(1).max(120).describe("What blocks the way, e.g. 'pallets in the aisle'"),
+        affects: z.enum(["everyone", "wheelchair"]).default("everyone"),
+        radius: z.number().min(2).max(15).default(4),
+      }),
+    },
+    async ({ x, y, level, description, affects, radius }) => {
+      const p: [number, number] = [Math.round(x * 10) / 10, Math.round(y * 10) / 10];
+      const lv = level === 1 ? "og" : "eg";
+      let nodes = ROUTER.nodesWithin(p, radius).filter((n) => levelOf(n) === lv && !n.endsWith(":b") && !n.endsWith(":t"));
+      if (!nodes.length) {
+        const near = ROUTER.nodesWithin(p, radius * 3).filter((n) => levelOf(n) === lv);
+        if (!near.length) return { content: [text("That spot isn't on a walkway. Please tap closer to a path.")], isError: true };
+        nodes = [near[0]];
+      }
+      const area = areaAt(p, lv);
+      const record = await setObstacle({
+        placeId: `area:${crypto.randomUUID().slice(0, 8)}`,
+        label: description.trim(),
+        p,
+        nodes,
+        affects,
+        status: "blocked",
+        note: `marked on the map in ${area}`,
+        radius,
+        level,
+      });
+      return {
+        content: [text(`Thanks! Marked "${record.label}" in ${area}. Routes now go around it.`)],
+        structuredContent: { placeId: record.placeId, label: record.label, p, level, radius, affects },
+      };
+    }
+  );
+
+  server.registerTool(
     "list_obstacles",
     {
       title: "List current obstacles",
@@ -195,26 +240,27 @@ const handler = createMcpHandler((server) => {
         mobility: mobilitySchema.default("walk"),
         seconds: z.number().positive(),
         holder: z.string().min(1).max(40).describe("Name to credit the time to"),
+        splits: z.record(z.string(), z.number().positive()).optional().describe("Seconds per route part id, from the widget's step-by-step navigation"),
       }),
     },
-    async ({ from, to, mobility, seconds, holder }) => {
+    async ({ from, to, mobility, seconds, holder, splits }) => {
       const a = findPlace(from),
         b = findPlace(to);
       if (!a || !b) return { content: [text("Couldn't resolve one of the places. Try search_places.")], isError: true };
       // Reject times nobody can walk (e.g. Start and Arrived tapped right after each other).
       const plan = await planRoute({ from, to, mobility: "walk", avoidCrowds: false });
       const planned = plan.ok ? plan.data.compare.fastest?.seconds ?? null : null;
+      // A normal result, not isError: ChatGPT turns tool errors into exceptions in the widget.
       if (planned && seconds < planned * MIN_PLAUSIBLE_SHARE) {
-        return {
-          content: [text(`${fmtSeconds(seconds)} is faster than anyone can walk this route (planned ${fmtSeconds(planned)} at normal pace), so it wasn't saved.`)],
-          isError: true,
-        };
+        const reason = `${fmtSeconds(seconds)} is faster than anyone can walk this route (about ${fmtSeconds(planned)} at normal pace), so it wasn't saved.`;
+        return { content: [text(reason)], structuredContent: { saved: false, reason, minSeconds: Math.ceil(planned * MIN_PLAUSIBLE_SHARE) } };
       }
-      const r = await submitAttempt(a.id, b.id, mobility, Math.round(seconds), holder.trim());
+      const r = await submitAttempt(a.id, b.id, mobility, Math.round(seconds), holder.trim(), splits);
       const msg = r.isNewRecord
         ? `New record for ${a.name} → ${b.name} (${MOBILITY[mobility].label}): ${holder} in ${fmtSeconds(seconds)}!`
         : `${holder}: ${fmtSeconds(seconds)}, rank ${r.rank}. Record is ${fmtSeconds(r.previousRecord!.seconds)} by ${r.previousRecord!.holder} (${Math.round(seconds - r.previousRecord!.seconds)} s faster).`;
-      return { content: [text(msg)], structuredContent: { ...r, persistent: PERSISTENT } };
+      const gold = r.goldSplits.length ? ` Best split${r.goldSplits.length > 1 ? "s" : ""} on ${r.goldSplits.length} part${r.goldSplits.length > 1 ? "s" : ""}!` : "";
+      return { content: [text(msg + gold)], structuredContent: { saved: true, ...r, persistent: PERSISTENT } };
     }
   );
 });

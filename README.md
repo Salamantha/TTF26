@@ -56,30 +56,32 @@ other stands in the same category.
 | `report_obstacle` | Mark a place blocked (for everyone, or only wheelchair users, e.g. a broken lift), or `clear` = works / confirmed working |
 | `list_obstacles` | Everything currently reported blocked |
 | `get_leaderboard` | Fastest times for a route and profile |
-| `log_attempt` | Submit a race time; faster ones replace the record, implausible ones (< 40 % of the walking time) are rejected |
+| `log_attempt` | Submit a race time with optional per-part splits; faster ones replace the record, implausible ones (< 40 % of the walking time) aren't saved |
+| `mark_obstacle_area` | Save an obstacle at a point on the map (orange area, radius in m, floor) that routing avoids |
 
 ## Demo script
 
-1. "Timo has a broken leg and is on crutches, how does he get from the entrance to the TTF Hackathon?" →
-   the widget shows his route via Lift West, and the comparison card the fastest route via the stairs (Benny's)
-   and the step-free detour (~55 s). Toggle the profile buttons to compare walking / cane / wheelchair.
-2. "Race the record" in the widget starts the timer; "I've arrived" saves the time and asks for feedback:
-   "Was Lift West working?" → the card now shows "Lift West: confirmed working just now".
-3. "Lift West is out of service" → `report_obstacle`; the wheelchair route switches to Lift Ost.
-4. "Heatmap" shows the (simulated) crowd; with "avoid crowds" the route goes around busy spots.
+1. "Timo is on crutches, how does he get from the entrance to the TTF Hackathon?" → ChatGPT sums up the gap in a
+   sentence; the widget shows the route in 3D and "+57 s · Can you close the gap?" with stairs vs step-free bars.
+2. **Start** turns the widget into step-by-step navigation: the camera follows the current part (Foyer 1 → Foyer 10 →
+   Lift → 1. OG corridor → Tagungsraum), **Next** records a split per part like a speedrun (best splits are kept).
+3. Right after the lift: "Was Lift West working?" (one tap). On any part: **Obstacle here** → describe it, tap the spot
+   on the 2D map → saved as an orange area that routes avoid.
+4. At the end: your time vs the stairs route, save it to the leaderboard (collapsed under the gap card).
 
 ## The widget
 
 `find_accessible_route` sets `_meta["openai/outputTemplate"]` and `_meta.ui.resourceUri` to
-`ui://widget/route-map-3d-v2.html`. Under the 3D map it shows, in this order: the mobility switch, a
-fastest-vs-step-free card with "confirmed working" times for lifts, the record with a race timer, feedback
-questions, the stand card, collapsed directions. Buttons call the tools through `window.openai.callTool`
-(on `/map` a small stand-in calls `/api/mcp`), the running timer survives reloads via `setWidgetState`.
-The tool's text answer is kept short and tells ChatGPT not to repeat what the widget shows.
+`ui://widget/route-map-3d-v3.html`. Overview: mobility switch, 3D map (heatmap, avoid crowds), the gap card with
+**Start**, a collapsed leaderboard and **Report obstacle**. Navigation: total timer, current part with live split vs
+best/planned, **Next**, targeted questions, split list. Buttons call the tools through `window.openai.callTool` (on
+`/map` a small stand-in calls `/api/mcp`); a running navigation survives reloads via `setWidgetState`. The tool's text
+answer gives ChatGPT the facts and asks it to summarize the gap in one or two sentences, so the widget can stay
+almost text-free.
 
-The widget is one HTML document (~1 MB, mostly three.js) that ChatGPT loads once per connector refresh;
-each result carries only the route data (a few KB). Change the URI whenever the widget changes, or ChatGPT
-keeps showing the cached old one.
+The widget is one HTML document (~1 MB, mostly three.js) that ChatGPT loads once per connector refresh; each result
+carries only the route data (a few KB). Change the URI whenever the widget changes, or ChatGPT keeps showing the
+cached old one.
 
 ## Run locally
 

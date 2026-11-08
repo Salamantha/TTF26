@@ -38,7 +38,18 @@ interface RouteData {
   timeLabel: string;
   distanceLabel: string;
   via: string[];
-  steps: string[];
+  parts: {
+    id: string;
+    kind: "walk" | "lift" | "stairs";
+    title: string;
+    meters: number;
+    level: "eg" | "og";
+    points: Pt[];
+    placeName?: string;
+    plannedSeconds: number;
+    bestSeconds: number | null;
+    confirmedAt: string | null;
+  }[];
   compare: {
     fastest: { seconds: number; label: string; via: string[] } | null;
     stepFree: { seconds: number; label: string; via: string[] } | null;
@@ -46,14 +57,11 @@ interface RouteData {
   };
   leaderboard: { holder: string; seconds: number; label: string; recordedAt: string }[];
   persistent: boolean;
-  checks: { name: string; kind: "stairs" | "lift"; placeId: string; confirmedAt: string | null; approx: boolean }[];
-  notes: string[];
-  disclaimer: string;
   segments: { level: "eg" | "og"; points: Pt[] }[];
   fastestSegments: { level: "eg" | "og"; points: Pt[] }[] | null;
   start: Pt;
   end: Pt;
-  obstacles: { p: Pt; label: string; affects: string }[];
+  obstacles: { id: string; p: Pt; label: string; affects: string; radius: number; level: 0 | 1 }[];
   destSpaceId: string | null;
   stand: {
     code: string | null;
@@ -73,8 +81,16 @@ interface ToolResult {
   isError?: boolean;
 }
 
+interface Run {
+  key: string;
+  startedAt: number;
+  idx: number;
+  partStartedAt: number;
+  splits: Record<string, number>;
+}
+
 interface WidgetState {
-  race?: { key: string; startedAt: number } | null;
+  run?: Run | null;
   name?: string;
   heat?: boolean;
 }
@@ -113,6 +129,7 @@ const PALETTES = {
   dark: { bg: "#16181d", hall: "#2b2f37", stroke: "#4b5263", booth: "#3a4250", stage: "#6b5a3e", block: "#30343c", accent: "#ff6b4a", eg: "#3fb950", og: "#58a6ff", fast: "#f0a43a", text: "#e6edf3" },
 };
 
+const SVG_NS = "http://www.w3.org/2000/svg";
 const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
 const centroid = (poly: Pt[]): Pt => {
   let x = 0,
@@ -510,12 +527,7 @@ function start() {
     const floorY = (s: RouteData["segments"][number] | undefined) => (s?.level === "og" ? OG_Y : 0);
     label("A", d.start, floorY(d.segments[0]) + 4, "pin a", null, routeGroup);
     label("B", d.end, floorY(d.segments[d.segments.length - 1]) + 4, "pin b", null, routeGroup);
-    for (const o of d.obstacles) {
-      const cyl = new THREE.Mesh(new THREE.CylinderGeometry(1.6, 1.6, 3, 20), new THREE.MeshStandardMaterial({ color: "#d1242f", emissive: "#5a0d10" }));
-      cyl.position.set(o.p[0], 1.5, o.p[1]);
-      routeGroup.add(cyl);
-      label(`⚠ ${o.label}`, o.p, 4.5, "obstacle", null, routeGroup);
-    }
+    drawObstacles(d.obstacles);
 
     selectedBooth = d.destSpaceId;
     paint();
@@ -528,10 +540,61 @@ function start() {
     frame(false);
   }
 
+  // Reported obstacles as orange areas at their real radius, on their floor.
+  const obstacleGroup = new THREE.Group();
+  scene.add(obstacleGroup);
+  const obstacleMat = new THREE.MeshBasicMaterial({ color: "#f97316", transparent: true, opacity: 0.45, depthWrite: false, side: THREE.DoubleSide });
+  const obstacleRing = new THREE.MeshBasicMaterial({ color: "#ea580c", depthTest: false, transparent: true, opacity: 0.9 });
+  function drawObstacles(list: RouteData["obstacles"]) {
+    for (const c of [...obstacleGroup.children]) {
+      obstacleGroup.remove(c);
+      if (c instanceof THREE.Mesh) c.geometry.dispose();
+    }
+    for (const o of list) {
+      const y = (o.level === 1 ? OG_Y : 0) + 0.2;
+      const disc = new THREE.Mesh(new THREE.CircleGeometry(o.radius, 40).rotateX(-Math.PI / 2), obstacleMat);
+      disc.position.set(o.p[0], y, o.p[1]);
+      disc.renderOrder = 5;
+      const ring = new THREE.Mesh(new THREE.RingGeometry(o.radius - 0.25, o.radius, 48).rotateX(-Math.PI / 2), obstacleRing);
+      ring.position.set(o.p[0], y + 0.01, o.p[1]);
+      ring.renderOrder = 6;
+      obstacleGroup.add(disc, ring);
+      label(`⚠ ${o.label}`, o.p, y + 3, "obstacle", null, obstacleGroup);
+    }
+  }
+
+  // Current navigation step: a bright tube on top of the route, and the camera follows it.
+  const hlGroup = new THREE.Group();
+  scene.add(hlGroup);
+  const hlMat = new THREE.MeshBasicMaterial({ color: "#facc15", depthTest: false, transparent: true, opacity: 0.95 });
+  function highlightPart(part: RouteData["parts"][number] | null, prevLevel: "eg" | "og" = "eg") {
+    for (const c of [...hlGroup.children]) {
+      hlGroup.remove(c);
+      if (c instanceof THREE.Mesh) c.geometry.dispose();
+    }
+    if (!part) return;
+    // Stairs/lift parts start on the floor they leave; walking parts stay on one floor.
+    const ys = part.points.map((_, i) => ((part.kind === "walk" ? part.level : i === 0 ? prevLevel : part.level) === "og" ? OG_Y : 0) + 0.9);
+    const vs = part.points.map(([x, z], i) => new THREE.Vector3(x, ys[i], z));
+    const path = new THREE.CurvePath<THREE.Vector3>();
+    for (let k = 1; k < vs.length; k++) if (vs[k - 1].distanceTo(vs[k]) > 0.01) path.add(new THREE.LineCurve3(vs[k - 1], vs[k]));
+    if (path.curves.length) {
+      const tube = new THREE.Mesh(new THREE.TubeGeometry(path, path.curves.length * 2, ROUTE_R * 1.7, 8, false), hlMat);
+      tube.renderOrder = 7;
+      hlGroup.add(tube);
+    }
+    const box = new THREE.Box3().setFromPoints(vs);
+    frameBox(box, true, 30);
+  }
+
   function frame(animated: boolean, topDown = false) {
-    const c = routeBox.getCenter(new THREE.Vector3());
-    const size = routeBox.getSize(new THREE.Vector3());
-    const span = Math.max(size.x, size.z, 40) * 1.25;
+    frameBox(routeBox, animated, 40, topDown);
+  }
+
+  function frameBox(box: THREE.Box3, animated: boolean, minSpan: number, topDown = false) {
+    const c = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const span = Math.max(size.x, size.z, minSpan) * 1.25;
     const dist = clamp(span / (2 * Math.tan((FOV * RAD) / 2)) / Math.min(1, camera.aspect) + 10, 25, 700);
     const polar = topDown ? 0.01 : POLAR;
     const pos = new THREE.Vector3().setFromSphericalCoords(dist, polar, topDown ? 0 : -0.35).add(c);
@@ -641,7 +704,7 @@ function start() {
     toastEl.textContent = msg;
     toastEl.hidden = false;
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => (toastEl.hidden = true), 6000);
+    toastTimer = setTimeout(() => (toastEl.hidden = true), 5000);
   };
 
   const legend = $("ttf-heat-legend");
@@ -657,18 +720,35 @@ function start() {
     saveState({ heat: heatOn });
   };
 
+  // ChatGPT wraps tool errors in a Python-style dump ("RuntimeException: … TextContent(type='text', text='…')");
+  // show only the tool's own text.
+  const readable = (raw: string): string => {
+    const m = raw.match(/text=\\?["']([\s\S]+?)\\?["'],\s*annotations/);
+    if (m) return m[1].replace(/\\"/g, '"');
+    try {
+      const j = JSON.parse(raw);
+      if (typeof j?.detail === "string") return readable(j.detail);
+    } catch {}
+    return raw.length > 200 ? "Something went wrong. Please try again." : raw;
+  };
   const canCall = !!window.openai?.callTool;
   const call = async (name: string, args: Record<string, unknown>) => {
-    const r = await window.openai!.callTool!(name, args);
+    let r: ToolResult;
+    try {
+      r = await window.openai!.callTool!(name, args);
+    } catch (e) {
+      throw new Error(readable(String((e as Error)?.message ?? e)));
+    }
     const msg = r?.content?.find((c) => c.type === "text")?.text ?? "";
-    if (r?.isError) throw new Error(msg || "Something went wrong.");
-    return { msg, data: r?.structuredContent };
+    if (r?.isError) throw new Error(readable(msg) || "Something went wrong.");
+    return { msg, data: r?.structuredContent as Record<string, unknown> | undefined };
   };
 
   let last: RouteData | null = null;
   let busy = false;
+  let mode: "overview" | "nav" | "finish" = "overview";
   const replan = async (patch: { mobility?: Mobility; avoidCrowds?: boolean }) => {
-    if (!last || busy || !canCall) return;
+    if (!last || busy || !canCall || mode !== "overview") return;
     busy = true;
     root.classList.add("busy");
     try {
@@ -678,7 +758,7 @@ function start() {
         mobility: patch.mobility ?? last.mobility,
         avoidCrowds: patch.avoidCrowds ?? last.avoidCrowds,
       });
-      show(data as RouteData, true);
+      show(data as unknown as RouteData, true);
     } catch (e) {
       toast((e as Error).message);
     } finally {
@@ -693,6 +773,15 @@ function start() {
     cane: "M13.5 5.5c1.09 0 2-.9 2-2s-.91-2-2-2-2 .9-2 2 .9 2 2 2zM20 12.5V23h-1V12.5c0-.28-.22-.5-.5-.5s-.5.22-.5.5v1h-1v-.69c-1.46-.38-2.7-1.29-3.51-2.52-.31.87-.49 1.78-.49 2.71 0 .23.02.46.03.69L15 16.5V23h-2v-5l-1.78-2.54L11 19l-3 4-1.6-1.2L9 18.33V13c0-1.15.18-2.29.5-3.39l-1.5.85V14H6V9.3l5.4-3.07v.01c.59-.31 1.32-.33 1.94.03.36.21.63.51.8.85l.79 1.67C15.58 10.1 16.94 11 18.5 11c.83 0 1.5.67 1.5 1.5z",
     wheelchair: "M12 4c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm7 7V9c-1.54.02-3.09-.75-4.07-1.83l-1.29-1.43c-.17-.19-.38-.34-.61-.45-.01 0-.01-.01-.02-.01H13c-.35-.2-.75-.3-1.19-.26C10.76 5.11 10 6.04 10 7.09V13c0 1.1.9 2 2 2h5v5h2v-5.5c0-1.1-.9-2-2-2h-3v-3.45c1.29 1.07 3.25 1.94 5 1.95zm-6.17 5c-.41 1.16-1.52 2-2.83 2-1.66 0-3-1.34-3-3 0-1.31.84-2.41 2-2.83V12.1c-2.28.46-4 2.48-4 4.9 0 2.76 2.24 5 5 5 2.42 0 4.44-1.72 4.9-4h-2.07z",
   };
+  const icon = (m: Mobility) => {
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("aria-hidden", "true");
+    const path = document.createElementNS(SVG_NS, "path");
+    path.setAttribute("d", ICON[m]);
+    svg.appendChild(path);
+    return svg;
+  };
   const PROFILE_LABEL: Record<Mobility, string> = { walk: "Walking", cane: "Cane / crutches", wheelchair: "Wheelchair" };
   const prof = $("ttf-profile");
   for (const m of ["walk", "cane", "wheelchair"] as Mobility[]) {
@@ -700,262 +789,429 @@ function start() {
     b.type = "button";
     b.dataset.m = m;
     b.title = PROFILE_LABEL[m];
-    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    svg.setAttribute("viewBox", "0 0 24 24");
-    svg.setAttribute("aria-hidden", "true");
-    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    path.setAttribute("d", ICON[m]);
-    svg.appendChild(path);
-    b.append(svg, el("span", "", PROFILE_LABEL[m]));
-    b.disabled = !canCall;
+    b.setAttribute("aria-label", PROFILE_LABEL[m]);
+    b.append(icon(m));
     b.onclick = () => replan({ mobility: m });
   }
   const avoid = $("ttf-avoid") as HTMLInputElement;
-  avoid.disabled = !canCall;
   avoid.onchange = () => replan({ avoidCrowds: avoid.checked });
 
-  const ago = (iso: string) => {
-    const s = (Date.now() - Date.parse(iso)) / 1000;
-    if (s < 60) return "just now";
-    if (s < 3600) return `${Math.round(s / 60)} min ago`;
-    if (s < 86400) return `${Math.round(s / 3600)} h ago`;
-    return `${Math.round(s / 86400)} days ago`;
+  const clock = (s: number, tenths = false) => {
+    const t = Math.max(0, s);
+    const m = Math.floor(t / 60);
+    const sec = t % 60;
+    return `${m}:${(tenths ? sec.toFixed(1) : String(Math.floor(sec))).padStart(tenths ? 4 : 2, "0")}`;
   };
-  const clock = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+  const signed = (s: number) => `${s > 0 ? "+" : "−"}${Math.abs(s).toFixed(1)}`;
+
+  function setMode(m: typeof mode) {
+    mode = m;
+    $("ttf-overview").hidden = m !== "overview";
+    $("ttf-nav").hidden = m !== "nav";
+    $("ttf-finish").hidden = m !== "finish";
+    const locked = m !== "overview" || !canCall;
+    prof.querySelectorAll("button").forEach((b) => (b.disabled = locked));
+    avoid.disabled = locked;
+    root.classList.toggle("navigating", m === "nav");
+  }
 
   function renderHeader(d: RouteData) {
     $("ttf-title").textContent = `${d.fromName} → ${d.toName}`;
-    $("ttf-sub").textContent = `${d.mobilityLabel} · ${d.timeLabel} · ${d.distanceLabel}${d.via.length ? ` · via ${d.via.join(", ")}` : ""}`;
+    $("ttf-sub").textContent = `${d.timeLabel} · ${d.distanceLabel}`;
     prof.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.m === d.mobility)));
     avoid.checked = d.avoidCrowds;
   }
 
-  function renderCompare(d: RouteData) {
-    const card = $("ttf-compare");
+  // ---------------------------------------------------------------- overview: the gap + one call to action
+
+  function renderOverview(d: RouteData) {
+    const card = $("ttf-gap");
     card.replaceChildren();
     const { fastest, stepFree, gapSeconds } = d.compare;
-    el("div", "card-title", "Fastest vs step-free (same walking pace)", card);
+    const head = el("div", "gap-head", undefined, card);
+    el("span", gapSeconds ? "gap-big" : "gap-big zero", gapSeconds ? `+${gapSeconds} s` : "0 s", head);
+    el("span", "gap-q", gapSeconds ? "Can you close the gap?" : "No gap here. Beat the record?", head);
     const max = Math.max(fastest?.seconds ?? 0, stepFree?.seconds ?? 0, 1);
-    const row = (label: string, r: RouteData["compare"]["fastest"], cls: string) => {
-      const line = el("div", "cmp-row", undefined, card);
-      el("span", "cmp-label", label, line);
-      const bar = el("span", "cmp-bar", undefined, line);
-      el("i", cls, undefined, bar).style.width = `${r ? (r.seconds / max) * 100 : 0}%`;
-      el("span", "cmp-time", r ? r.label : "no route", line);
-      el("span", "cmp-via", r ? (r.via.length ? `via ${r.via.join(", ")}` : "no floor change") : "", line);
+    const bar = (m: Mobility, label: string, r: RouteData["compare"]["fastest"], cls: string) => {
+      const row = el("div", "bar-row", undefined, card);
+      const lab = el("span", "bar-label", undefined, row);
+      lab.append(icon(m), label);
+      const track = el("span", "bar", undefined, row);
+      el("i", cls, undefined, track).style.width = `${r ? (r.seconds / max) * 100 : 0}%`;
+      el("span", "bar-time", r ? clock(r.seconds) : "–", row);
     };
-    row("Fastest", fastest, "fast");
-    row("Step-free", stepFree, "free");
-    el(
-      "div",
-      gapSeconds ? "gap" : "gap zero",
-      gapSeconds
-        ? `Step-free detour: +${gapSeconds} s. Confirming lifts and reporting obstacles brings it toward zero.`
-        : "No detour: step-free visitors are as fast as everyone else here.",
-      card
-    );
-    for (const c of d.checks) {
-      el(
-        "div",
-        c.confirmedAt ? "check ok" : "check",
-        `${c.name}: ${c.confirmedAt ? `confirmed working ${ago(c.confirmedAt)}` : "not confirmed yet"}${c.approx ? " · position estimated" : ""}`,
-        card
-      );
+    bar("walk", "Stairs", fastest, "fast");
+    bar("wheelchair", "Step-free", stepFree, "free");
+    const go = el("button", "primary big", "Start ▸", card);
+    go.type = "button";
+    go.disabled = !canCall;
+    go.onclick = () => startRun(d);
+
+    const lb = $("ttf-lb");
+    lb.replaceChildren();
+    el("summary", "", `Leaderboard${d.leaderboard.length ? ` · ${d.leaderboard[0].label}` : ""}`, lb);
+    if (d.leaderboard.length) {
+      const ol = el("ol", "lb", undefined, lb);
+      d.leaderboard.forEach((a) => {
+        const li = el("li", "", undefined, ol);
+        el("span", "", a.holder, li);
+        el("strong", "", clock(a.seconds), li);
+      });
+    } else el("div", "muted", "No times yet.", lb);
+
+    const stand = $("ttf-stand");
+    stand.replaceChildren();
+    stand.hidden = !d.stand;
+    if (d.stand) {
+      const det = el("details", "", undefined, stand);
+      el("summary", "", `${d.stand.exhibitor ?? "Stand"} · ${d.stand.code ?? ""}`, det);
+      if (d.stand.whyVisit) el("p", "muted", d.stand.whyVisit, det);
+      if (d.stand.website) {
+        const a = el("a", "link", d.stand.website.replace(/^https?:\/\//, "").replace(/\/$/, ""), det);
+        a.href = d.stand.website;
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
+      }
     }
   }
+  $("ttf-report-btn").onclick = () => last && openReport(last, null);
 
-  const raceKey = (d: RouteData) => `${d.query.from}|${d.query.to}|${d.mobility}`;
+  // ---------------------------------------------------------------- step-by-step navigation with splits
+
   let tick: ReturnType<typeof setInterval> | null = null;
   const stopTick = () => {
     if (tick) clearInterval(tick);
     tick = null;
   };
+  const runKey = (d: RouteData) => `${d.query.from}|${d.query.to}|${d.mobility}`;
+  const levelBefore = (d: RouteData, idx: number) => (idx > 0 ? d.parts[idx - 1].level : d.segments[0]?.level ?? "eg");
+  const target = (p: RouteData["parts"][number]) => p.bestSeconds ?? p.plannedSeconds;
 
-  function renderRace(d: RouteData) {
-    stopTick();
-    const card = $("ttf-race");
-    card.replaceChildren();
-    el("div", "card-title", `Route record · ${d.mobilityLabel}`, card);
-    if (d.leaderboard.length) {
-      const ol = el("ol", "lb", undefined, card);
-      d.leaderboard.forEach((a, i) => {
-        const li = el("li", i ? "" : "first", undefined, ol);
-        el("span", "", a.holder, li);
-        el("strong", "", a.label, li);
-      });
-    } else el("div", "muted", `No record yet. Planned time: ${d.timeLabel}. Be the first!`, card);
-    const running = state.race && state.race.key === raceKey(d) ? state.race : null;
-    const row = el("div", "race-row", undefined, card);
-    if (!running) {
-      const b = el("button", "primary", d.leaderboard.length ? `Race the record (${d.leaderboard[0].label})` : "Start the timer", row);
-      b.type = "button";
-      b.disabled = !canCall;
-      b.onclick = () => {
-        saveState({ race: { key: raceKey(d), startedAt: Date.now() } });
-        renderRace(d);
-      };
-    } else {
-      const t = el("span", "timer", clock((Date.now() - running.startedAt) / 1000), row);
-      tick = setInterval(() => (t.textContent = clock((Date.now() - running.startedAt) / 1000)), 500);
-      const done = el("button", "primary", "I've arrived", row);
-      const cancel = el("button", "", "Cancel", row);
-      done.type = cancel.type = "button";
-      cancel.onclick = () => {
-        saveState({ race: null });
-        renderRace(d);
-      };
-      done.onclick = () => {
-        stopTick();
-        finishRace(d, Math.max(1, Math.round((Date.now() - running.startedAt) / 1000)));
-      };
-    }
-    if (!d.persistent) el("div", "muted small", "Times are kept in memory until the database is connected.", card);
+  function startRun(d: RouteData) {
+    const now = Date.now();
+    saveState({ run: { key: runKey(d), startedAt: now, idx: 0, partStartedAt: now, splits: {} } });
+    $("ttf-q").replaceChildren();
+    enterNav(d);
   }
 
-  function finishRace(d: RouteData, seconds: number) {
-    const card = $("ttf-race");
+  function enterNav(d: RouteData) {
+    setMode("nav");
+    renderNav(d);
+    stopTick();
+    tick = setInterval(() => updateTimers(d), 100);
+    updateTimers(d);
+  }
+
+  function renderNav(d: RouteData) {
+    const run = state.run!;
+    const part = d.parts[run.idx];
+    $("ttf-nav-step").textContent = `Step ${run.idx + 1}/${d.parts.length}`;
+    $("ttf-nav-title").textContent = part.title;
+    $("ttf-nav-meta").textContent = part.kind === "walk" ? `${part.meters} m` : part.kind === "lift" ? "lift" : "stairs";
+    $("ttf-nav-target").textContent = part.bestSeconds !== null ? `best ${clock(part.bestSeconds, true)}` : `plan ${clock(part.plannedSeconds)}`;
+    $("ttf-nav-next").textContent = run.idx === d.parts.length - 1 ? "Arrived ✓" : "Next ▸";
+    const list = $("ttf-splits");
+    list.replaceChildren(
+      ...d.parts.map((p, i) => {
+        const li = el("li", i < run.idx ? "done" : i === run.idx ? "current" : "");
+        el("span", "s-name", p.title, li);
+        const sec = run.splits[p.id];
+        if (sec !== undefined) {
+          const delta = sec - target(p);
+          const gold = p.bestSeconds === null || sec < p.bestSeconds;
+          el("span", `s-delta ${gold ? "gold" : delta > 0 ? "slow" : "fast"}`, gold && p.bestSeconds !== null ? "best!" : signed(delta), li);
+          el("span", "s-time", clock(sec, true), li);
+        } else {
+          el("span", "s-delta", "", li);
+          el("span", "s-time muted", clock(target(p)), li);
+        }
+        return li;
+      })
+    );
+    highlightPart(part, levelBefore(d, run.idx));
+  }
+
+  function updateTimers(d: RouteData) {
+    const run = state.run;
+    if (!run) return;
+    const now = Date.now();
+    $("ttf-nav-total").textContent = clock((now - run.startedAt) / 1000, true);
+    const part = d.parts[run.idx];
+    if (!part) return;
+    const split = (now - run.partStartedAt) / 1000;
+    $("ttf-nav-split").textContent = clock(split, true);
+    const delta = split - target(part);
+    const dl = $("ttf-nav-delta");
+    dl.textContent = signed(delta);
+    dl.className = `delta ${delta > 0 ? "slow" : "fast"}`;
+  }
+
+  function nextPart(d: RouteData) {
+    const run = state.run;
+    if (!run) return;
+    const part = d.parts[run.idx];
+    const now = Date.now();
+    const splits = { ...run.splits, [part.id]: Math.round(Math.max(0.1, (now - run.partStartedAt) / 1000) * 10) / 10 };
+    const idx = run.idx + 1;
+    saveState({ run: { ...run, idx, partStartedAt: now, splits } });
+    ask(d, part);
+    if (idx >= d.parts.length) {
+      stopTick();
+      highlightPart(null);
+      finish(d);
+      return;
+    }
+    renderNav(d);
+  }
+  $("ttf-nav-next").onclick = () => last && nextPart(last);
+  $("ttf-nav-stop").onclick = () => {
+    stopTick();
+    saveState({ run: null });
+    highlightPart(null);
+    $("ttf-q").replaceChildren();
+    if (last) {
+      setMode("overview");
+      renderOverview(last);
+    }
+    frame(true);
+  };
+  $("ttf-nav-obstacle").onclick = () => {
+    if (!last || !state.run) return;
+    openReport(last, last.parts[state.run.idx] ?? null);
+  };
+
+  /** Targeted question right after a stairs/lift part: one tap, answered into routing for everyone. */
+  function ask(d: RouteData, part: RouteData["parts"][number]) {
+    const q = $("ttf-q");
+    q.replaceChildren();
+    if (part.kind === "walk" || !part.placeName) return;
+    const name = part.placeName;
+    el("span", "", `Was ${name} ${part.kind === "lift" ? "working" : "passable"}?`, q);
+    const yes = el("button", "", "Yes", q),
+      no = el("button", "", "No", q);
+    yes.type = no.type = "button";
+    yes.disabled = no.disabled = !canCall;
+    const answer = async (working: boolean) => {
+      yes.disabled = no.disabled = true;
+      try {
+        await call(
+          "report_obstacle",
+          working
+            ? { location: name, status: "clear" }
+            : { location: name, status: "blocked", affects: part.kind === "lift" ? "wheelchair" : "everyone", note: "reported during navigation" }
+        );
+        q.replaceChildren(el("span", "muted", working ? `Thanks, ${name} marked as working.` : `Thanks, ${name} marked as out of order.`));
+      } catch (e) {
+        toast((e as Error).message);
+        yes.disabled = no.disabled = false;
+      }
+    };
+    yes.onclick = () => answer(true);
+    no.onclick = () => answer(false);
+  }
+
+  // ---------------------------------------------------------------- finish
+
+  function finish(d: RouteData) {
+    setMode("finish");
+    const run = state.run!;
+    const total = Math.round(Object.values(run.splits).reduce((a, b) => a + b, 0));
+    const card = $("ttf-finish");
     card.replaceChildren();
-    el("div", "card-title", `You made it in ${clock(seconds)}`, card);
-    const form = el("form", "race-row", undefined, card);
+    const fastest = d.compare.fastest?.seconds ?? null;
+    if (fastest && total < fastest * 0.4) {
+      el("div", "gap-q", `${clock(total)}: too fast to count`, card);
+      el("div", "muted", "Tap Next as you finish each part of the route.", card);
+      doneButtons(card, d);
+      return;
+    }
+    const head = el("div", "gap-head", undefined, card);
+    const vsStairs = fastest !== null ? total - fastest : null;
+    el("span", vsStairs !== null && vsStairs <= 0 ? "gap-big zero" : "gap-big", clock(total), head);
+    el("span", "gap-q", vsStairs !== null && vsStairs <= 0 ? "Gap closed!" : vsStairs !== null ? `+${vsStairs} s vs. stairs` : "Done!", head);
+    const max = Math.max(total, fastest ?? 0, d.compare.stepFree?.seconds ?? 0, 1);
+    const bar = (label: string, s: number | null, cls: string) => {
+      const row = el("div", "bar-row", undefined, card);
+      el("span", "bar-label", label, row);
+      el("i", cls, undefined, el("span", "bar", undefined, row)).style.width = `${s ? (s / max) * 100 : 0}%`;
+      el("span", "bar-time", s !== null ? clock(s) : "–", row);
+    };
+    bar("You", total, "you");
+    bar("Stairs", fastest, "fast");
+    const golds = d.parts.filter((p) => run.splits[p.id] !== undefined && (p.bestSeconds === null || run.splits[p.id] < p.bestSeconds)).length;
+    if (golds) el("div", "muted", `${golds} best split${golds > 1 ? "s" : ""}`, card);
+
+    const form = el("form", "row", undefined, card);
     const input = el("input", "", undefined, form);
     input.placeholder = "Your name";
     input.value = state.name ?? "";
     input.maxLength = 40;
     input.required = true;
     input.setAttribute("aria-label", "Your name");
-    const send = el("button", "primary", "Save my time", form);
-    send.type = "submit";
-    const skip = el("button", "", "Skip", form);
-    skip.type = "button";
-    skip.onclick = () => {
-      saveState({ race: null });
-      renderRace(d);
-      renderFeedback(d, true);
-    };
+    const save = el("button", "primary", "Save", form);
+    save.type = "submit";
     form.onsubmit = async (e) => {
       e.preventDefault();
       const name = input.value.trim();
       if (!name) return;
-      send.disabled = true;
-      saveState({ name, race: null });
+      save.disabled = true;
+      saveState({ name });
       try {
-        toast((await call("log_attempt", { from: d.query.from, to: d.query.to, mobility: d.mobility, seconds, holder: name })).msg);
+        const r = await call("log_attempt", { from: d.query.from, to: d.query.to, mobility: d.mobility, seconds: total, holder: name, splits: run.splits });
+        toast(r.data?.saved === false ? String(r.data.reason ?? r.msg) : r.msg);
+        form.replaceChildren(el("span", "muted", r.data?.saved === false ? "Not saved." : `Saved for ${name}.`));
       } catch (err) {
         toast((err as Error).message);
+        save.disabled = false;
       }
-      await replan({});
-      renderFeedback(last ?? d, true);
     };
-    input.focus();
+    doneButtons(card, d);
   }
 
-  function renderFeedback(d: RouteData, open: boolean) {
-    const card = $("ttf-feedback");
+  function doneButtons(card: HTMLElement, d: RouteData) {
+    const row = el("div", "row", undefined, card);
+    const again = el("button", "", "Try again", row);
+    const done = el("button", "", "Done", row);
+    again.type = done.type = "button";
+    again.onclick = () => startRun(d);
+    done.onclick = () => {
+      saveState({ run: null });
+      $("ttf-q").replaceChildren();
+      setMode("overview");
+      renderOverview(d);
+      frame(true);
+      replan({});
+    };
+  }
+
+  // ---------------------------------------------------------------- report: describe + tap the spot on a 2D map
+
+  const sv = (tag: string, attrs: Record<string, string | number>, parent: Element) => {
+    const n = document.createElementNS(SVG_NS, tag);
+    for (const k in attrs) n.setAttribute(k, String(attrs[k]));
+    parent.appendChild(n);
+    return n;
+  };
+  const pts = (p: Pt[]) => p.map(([x, y]) => `${x},${y}`).join(" ");
+
+  function openReport(d: RouteData, part: RouteData["parts"][number] | null) {
+    const card = $("ttf-report");
     card.replaceChildren();
-    card.hidden = !open;
-    if (!open) return;
-    el("div", "card-title", "Help keep this route up to date", card);
-    const answer = async (buttons: HTMLButtonElement[], run: () => Promise<{ msg: string }>, refresh: boolean) => {
-      buttons.forEach((b) => (b.disabled = true));
+    card.hidden = false;
+    const usesOg = d.segments.some((s) => s.level === "og");
+    let level: 0 | 1 = part ? (part.level === "og" ? 1 : 0) : d.segments[0]?.level === "og" ? 1 : 0;
+    const focusAll = d.segments.flatMap((s) => s.points);
+    const focus = part && part.points.length ? part.points : focusAll;
+    const mid = focus[Math.floor(focus.length / 2)];
+    let marker: Pt | null = part ? [mid[0], mid[1]] : null;
+
+    const head = el("div", "row", undefined, card);
+    el("strong", "", "Report an obstacle", head);
+    const close = el("button", "ghost", "✕", head);
+    close.type = "button";
+    close.setAttribute("aria-label", "Close");
+    close.onclick = () => (card.hidden = true);
+    const what = el("input", "", undefined, card);
+    what.placeholder = "What's blocking the way?";
+    what.maxLength = 120;
+    what.setAttribute("aria-label", "What's blocking the way?");
+
+    let floorRow: HTMLElement | null = null;
+    if (usesOg) {
+      floorRow = el("div", "floors", undefined, card);
+      for (const [lv, lab] of [[0, "Ground floor"], [1, "1. OG"]] as const) {
+        const b = el("button", "", lab, floorRow);
+        b.type = "button";
+        b.dataset.lv = String(lv);
+        b.onclick = () => {
+          level = lv;
+          draw();
+        };
+      }
+    }
+    const svg = sv("svg", { class: "map2d", role: "img", "aria-label": "Tap where the obstacle is" }, card) as SVGSVGElement;
+    el("div", "muted small", "Tap the map where the obstacle is.", card);
+    const row = el("div", "row", undefined, card);
+    const lab = el("label", "small", undefined, row);
+    const wc = el("input", "", undefined, lab);
+    wc.type = "checkbox";
+    lab.append(" only blocks wheelchairs");
+    const save = el("button", "primary", "Save", row);
+    save.type = "button";
+
+    function draw() {
+      floorRow?.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.lv === String(level))));
+      svg.replaceChildren();
+      let x0 = Infinity,
+        y0 = Infinity,
+        x1 = -Infinity,
+        y1 = -Infinity;
+      for (const [x, y] of focus) {
+        x0 = Math.min(x0, x);
+        y0 = Math.min(y0, y);
+        x1 = Math.max(x1, x);
+        y1 = Math.max(y1, y);
+      }
+      const pad = 20,
+        w = Math.max(x1 - x0 + 2 * pad, 60),
+        h = Math.max(y1 - y0 + 2 * pad, 40);
+      svg.setAttribute("viewBox", `${(x0 + x1) / 2 - w / 2} ${(y0 + y1) / 2 - h / 2} ${w} ${h}`);
+      const base = sv("g", { class: "base" }, svg);
+      if (level === 0) {
+        for (const hl of venue.halls) sv("polygon", { points: pts(hl.poly), class: "hall" }, base);
+        for (const b of venue.booths) sv("polygon", { points: pts(b.poly), class: "booth" }, base);
+      } else {
+        sv("polygon", { points: pts(venue.og.outline), class: "hall" }, base);
+        for (const a of venue.og.areas) sv("polygon", { points: pts(a.poly), class: a.kind === "room" || a.kind === "lobby" ? "hall" : "booth" }, base);
+      }
+      for (const s of d.segments) if ((s.level === "og" ? 1 : 0) === level) sv("polyline", { points: pts(s.points), class: `route ${s.level}` }, svg);
+      if (part && part.kind === "walk" && (part.level === "og" ? 1 : 0) === level) sv("polyline", { points: pts(part.points), class: "route current" }, svg);
+      for (const o of d.obstacles) if (o.level === level) sv("circle", { cx: o.p[0], cy: o.p[1], r: o.radius, class: "obst" }, svg);
+      if (marker) sv("circle", { cx: marker[0], cy: marker[1], r: 4, class: "marker" }, svg);
+    }
+    svg.addEventListener("click", (e) => {
+      const ctm = svg.getScreenCTM();
+      if (!ctm) return;
+      const p = new DOMPoint(e.clientX, e.clientY).matrixTransform(ctm.inverse());
+      marker = [Math.round(p.x * 10) / 10, Math.round(p.y * 10) / 10];
+      draw();
+    });
+    save.disabled = !canCall;
+    save.onclick = async () => {
+      const description = what.value.trim();
+      if (!description) return what.focus();
+      if (!marker) return toast("Tap the map where the obstacle is.");
+      save.disabled = true;
       try {
-        toast((await run()).msg);
-        if (refresh) await replan({});
-      } catch (e) {
-        toast((e as Error).message);
-        buttons.forEach((b) => (b.disabled = false));
+        const r = await call("mark_obstacle_area", { x: marker[0], y: marker[1], level, description, affects: wc.checked ? "wheelchair" : "everyone" });
+        toast(r.msg);
+        card.hidden = true;
+        // Show it right away; during navigation the route itself stays as it is.
+        d.obstacles = [...d.obstacles, { id: String(r.data?.placeId ?? "new"), p: marker, label: description, affects: wc.checked ? "wheelchair" : "everyone", radius: 4, level }];
+        drawObstacles(d.obstacles);
+        if (mode === "overview") replan({});
+      } catch (err) {
+        toast((err as Error).message);
+        save.disabled = false;
       }
     };
-    for (const c of d.checks) {
-      const row = el("div", "fb-row", undefined, card);
-      el("span", "", `Was ${c.name} ${c.kind === "lift" ? "working" : "passable"}?`, row);
-      const y = el("button", "", "Yes", row),
-        n = el("button", "", "No", row);
-      y.type = n.type = "button";
-      y.disabled = n.disabled = !canCall;
-      y.onclick = () => answer([y, n], () => call("report_obstacle", { location: c.name, status: "clear" }), true);
-      n.onclick = () =>
-        answer(
-          [y, n],
-          () => call("report_obstacle", { location: c.name, status: "blocked", affects: c.kind === "lift" ? "wheelchair" : "everyone", note: "reported in the route widget" }),
-          true
-        );
-    }
-    const row = el("div", "fb-row", undefined, card);
-    el("span", "", "Anything blocking your way?", row);
-    const no = el("button", "", "No", row),
-      yes = el("button", "", "Yes", row);
-    no.type = yes.type = "button";
-    no.disabled = yes.disabled = !canCall;
-    no.onclick = () => {
-      no.disabled = yes.disabled = true;
-      toast("Thanks for checking!");
-    };
-    yes.onclick = () => {
-      no.disabled = yes.disabled = true;
-      const form = el("form", "race-row", undefined, card);
-      const where = el("input", "", undefined, form);
-      where.placeholder = "Where? e.g. Eingang Foyer 1, Halle 2";
-      where.required = true;
-      where.setAttribute("aria-label", "Where is the obstacle?");
-      const lab = el("label", "small", undefined, form);
-      const cb = el("input", "", undefined, lab);
-      cb.type = "checkbox";
-      lab.append(" only blocks wheelchairs");
-      const send = el("button", "primary", "Report", form);
-      send.type = "submit";
-      form.onsubmit = (e) => {
-        e.preventDefault();
-        answer(
-          [send],
-          () => call("report_obstacle", { location: where.value.trim(), status: "blocked", affects: cb.checked ? "wheelchair" : "everyone", note: "reported in the route widget" }),
-          true
-        );
-      };
-      where.focus();
-    };
-  }
-  $("ttf-report").onclick = () => last && renderFeedback(last, $("ttf-feedback").hidden);
-
-  function renderStand(d: RouteData) {
-    const card = $("ttf-stand");
-    card.replaceChildren();
-    card.hidden = !d.stand;
-    if (!d.stand) return;
-    const s = d.stand;
-    el("div", "card-title", s.exhibitor ?? "Stand", card);
-    el("div", "muted", [s.code && `Stand ${s.code}`, s.hall, ...s.categories.slice(0, 3)].filter(Boolean).join(" · "), card);
-    if (s.whyVisit) {
-      const det = el("details", "", undefined, card);
-      el("summary", "", "Why visit", det);
-      el("p", "", s.whyVisit, det);
-    }
-    if (s.alsoHere.length) el("div", "muted small", `Also here: ${s.alsoHere.join(", ")}`, card);
-    if (s.website) {
-      const a = el("a", "link", s.website.replace(/^https?:\/\//, "").replace(/\/$/, ""), card);
-      a.href = s.website;
-      a.target = "_blank";
-      a.rel = "noopener noreferrer";
-    }
-    if (d.otherStands.length) el("div", "muted small", `Similar stands: ${d.otherStands.join("; ")}`, card);
+    draw();
+    what.focus();
   }
 
-  function renderDetails(d: RouteData) {
-    $("ttf-dir-sum").textContent = `Directions · ${d.steps.length} step${d.steps.length === 1 ? "" : "s"}`;
-    $("ttf-steps").replaceChildren(...d.steps.map((s) => el("li", "", s)));
-    $("ttf-foot").replaceChildren(...[...d.notes, d.disclaimer].map((s) => el("p", "", s)));
-    $("ttf-legend-fast").hidden = !d.fastestSegments;
-  }
+  // ---------------------------------------------------------------- data in
 
   const show = (d: RouteData | null | undefined, force = false) => {
-    if (!d || !d.segments || (d === last && !force)) return;
+    if (!d || !d.segments || !d.parts || (d === last && !force)) return;
     last = d;
     drawRoute(d);
     renderHeader(d);
-    renderCompare(d);
-    renderRace(d);
-    renderStand(d);
-    renderDetails(d);
-    if (!$("ttf-feedback").hidden) renderFeedback(d, true);
+    const run = state.run && state.run.key === runKey(d) && state.run.idx < d.parts.length ? state.run : null;
+    if (run) enterNav(d);
+    else {
+      setMode("overview");
+      renderOverview(d);
+    }
   };
   const current = () => {
     try {

@@ -1,10 +1,11 @@
 import type { Pt, RouteResult } from "./routing";
 import { simTime } from "./crowd";
 import {
-  ROUTER, STAIRS_NODES, CONNECTOR_BY_NAME, levelOf, connectorOf, crowdFactors, findPlace, suggestPlaces, standInfo,
+  ROUTER, STAIRS_NODES, CONNECTOR_BY_NAME, levelOf, connectorOf, crowdFactors, findPlace, suggestPlaces, standInfo, areaAt,
   EXAMPLE_PLACES, type Place,
 } from "./venue";
-import { getObstacles, getConfirmations, getLeaderboard, PERSISTENT, type Mobility, type ObstacleRecord } from "./store";
+import { STAIRS_COST_M, LIFT_COST_M } from "./og";
+import { getObstacles, getConfirmations, getLeaderboard, getBestSplits, PERSISTENT, type Mobility, type ObstacleRecord } from "./store";
 
 /** Mobility profiles from team-05: walking speed, stairs cost factor, room needed in crowds. */
 export const MOBILITY: Record<Mobility, { label: string; speed: number; stairs: number; space: number }> = {
@@ -23,15 +24,32 @@ export interface Segment {
   points: Pt[];
 }
 
+/** A route part for step-by-step navigation and speedrun-style splits. */
+export interface Part {
+  /** stable across requests (area or connector), so best splits can be matched */
+  id: string;
+  kind: "walk" | "lift" | "stairs";
+  title: string;
+  meters: number;
+  level: "eg" | "og";
+  points: Pt[];
+  /** for stairs/lift parts: which place the feedback question is about */
+  placeName?: string;
+  weight: number;
+}
+
 interface Leg {
   fromName: string;
   toName: string;
   dest: Place["instances"][number] | null;
   meters: number;
   via: string[];
-  steps: string[];
+  parts: Part[];
   segments: Segment[];
 }
+
+/** Walking parts shorter than this are merged into a neighbour, so passing a doorway isn't its own step. */
+const MIN_PART_M = 10;
 
 const r1 = (v: number) => Math.round(v * 10) / 10;
 
@@ -42,42 +60,86 @@ export function fmtSeconds(s: number) {
   return m ? `${m}:${String(sec).padStart(2, "0")} min` : `${sec} s`;
 }
 
-function describe(r: RouteResult, from: Place, to: Place): Leg {
+const rp = (ps: Pt[]) => ps.map(([x, y]) => [r1(x), r1(y)] as Pt);
+const AREA_TITLE: Record<string, string> = { outside: "Outdoor path", "1. OG corridor": "1. OG corridor" };
+
+function describe(r: RouteResult, from: Place, to: Place, stairsFactor: number): Leg {
   const segments: Segment[] = [];
-  const steps: string[] = [];
   const via: string[] = [];
+  const parts: Part[] = [];
   let level = levelOf(r.nodeIds[0]);
-  let cur: Pt[] = [r.points[0]];
-  let walked = 0;
-  const floor = (l: string) => (l === "og" ? "on the 1. OG" : "on the ground floor");
+  let seg: Pt[] = [r.points[0]];
+  let run = { area: areaAt(r.points[0], level), level, points: [r.points[0]] as Pt[], meters: 0 };
+
+  const flush = () => {
+    if (run.points.length < 2 || run.meters < 0.5) return;
+    const prev = parts[parts.length - 1];
+    // Too short to be its own part: append to the previous walking part on the same floor.
+    if (run.meters < MIN_PART_M && prev?.kind === "walk" && prev.level === run.level) {
+      prev.points.push(...run.points.slice(1));
+      prev.meters += run.meters;
+      prev.weight += run.meters;
+      return;
+    }
+    parts.push({ id: `walk:${run.area}`, kind: "walk", title: AREA_TITLE[run.area] ?? run.area, meters: run.meters, level: run.level, points: run.points, weight: run.meters });
+  };
 
   for (let i = 1; i < r.nodeIds.length; i++) {
     const a = connectorOf(r.nodeIds[i - 1]);
     const b = connectorOf(r.nodeIds[i]);
     const next = levelOf(r.nodeIds[i]);
+    const p0 = r.points[i - 1],
+      p1 = r.points[i];
     if (a && b && a.id === b.id && next !== level) {
-      if (walked > 1) steps.push(`Walk ~${Math.round(walked)} m ${floor(level)}`);
-      segments.push({ level, points: cur });
-      steps.push(`Take ${a.name} ${next === "og" ? "up to the 1. OG" : "down to the ground floor"}`);
+      segments.push({ level, points: seg });
       via.push(a.name);
+      flush();
+      const up = next === "og";
+      parts.push({
+        id: `${a.kind}:${a.id}:${up ? "up" : "down"}`,
+        kind: a.kind,
+        title: `${a.name} ${up ? "up to 1. OG" : "down to ground floor"}`,
+        meters: 0,
+        level: next,
+        points: [p0, p1],
+        placeName: a.name,
+        weight: a.kind === "stairs" ? STAIRS_COST_M * stairsFactor : LIFT_COST_M,
+      });
       level = next;
-      cur = [r.points[i]];
-      walked = 0;
+      seg = [p1];
+      run = { area: areaAt(p1, level), level, points: [p1], meters: 0 };
       continue;
     }
-    const [x0, y0] = r.points[i - 1],
-      [x1, y1] = r.points[i];
-    walked += Math.hypot(x1 - x0, y1 - y0);
-    cur.push(r.points[i]);
+    const d = Math.hypot(p1[0] - p0[0], p1[1] - p0[1]);
+    seg.push(p1);
+    const area = areaAt(p1, level);
+    if (area !== run.area && run.meters >= MIN_PART_M) {
+      flush();
+      run = { area, level, points: [p0, p1], meters: d };
+    } else {
+      if (area !== run.area) run.area = area;
+      run.points.push(p1);
+      run.meters += d;
+    }
   }
-  segments.push({ level, points: cur });
+  segments.push({ level, points: seg });
+  flush();
 
   const first = r.nodeIds[0],
     last = r.nodeIds[r.nodeIds.length - 1];
   const fromName = from.instances.find((i) => i.anchors.includes(first))?.name ?? from.name;
   const dest = to.instances.find((i) => i.anchors.includes(last)) ?? null;
   const toName = dest?.name ?? to.name;
-  if (walked > 1) steps.push(`Walk ~${Math.round(walked)} m ${floor(level)} to ${toName}`);
+
+  // The same area can come up twice (e.g. a foyer before and after a lift); keep ids unique.
+  const seen = new Map<string, number>();
+  for (const p of parts) {
+    const n = (seen.get(p.id) ?? 0) + 1;
+    seen.set(p.id, n);
+    if (n > 1) p.id = `${p.id}#${n}`;
+    p.meters = Math.round(p.meters);
+    p.points = rp(p.points);
+  }
 
   return {
     fromName,
@@ -85,8 +147,8 @@ function describe(r: RouteResult, from: Place, to: Place): Leg {
     dest,
     meters: Math.round(r.meters),
     via,
-    steps,
-    segments: segments.map((s) => ({ level: s.level, points: s.points.map(([x, y]) => [r1(x), r1(y)] as Pt) })),
+    parts,
+    segments: segments.map((s) => ({ level: s.level, points: rp(s.points) })),
   };
 }
 
@@ -115,7 +177,12 @@ export async function planRoute(input: PlanInput) {
   const to = findPlace(input.to);
   if (!to) return { ok: false as const, error: unresolved(input.to) };
 
-  const [obstacleMap, confirmations, top] = await Promise.all([getObstacles(), getConfirmations(), getLeaderboard(from.id, to.id, mobility)]);
+  const [obstacleMap, confirmations, top, bestSplits] = await Promise.all([
+    getObstacles(),
+    getConfirmations(),
+    getLeaderboard(from.id, to.id, mobility),
+    getBestSplits(from.id, to.id, mobility),
+  ]);
   const obstacles = Object.values(obstacleMap).filter((o) => o.status === "blocked");
   const fa = from.instances.flatMap((i) => i.anchors),
     ta = to.instances.flatMap((i) => i.anchors);
@@ -143,10 +210,18 @@ export async function planRoute(input: PlanInput) {
     };
   }
 
-  const route = describe(main, from, to);
-  const fastLeg = fastest ? describe(fastest, from, to) : null;
-  const freeLeg = stepFree ? describe(stepFree, from, to) : null;
+  const route = describe(main, from, to, profile.stairs);
+  const fastLeg = fastest ? describe(fastest, from, to, 1) : null;
+  const freeLeg = stepFree ? describe(stepFree, from, to, Infinity) : null;
   const seconds = main.effMeters / profile.speed;
+  // Planned time per part: the route's total time shared out by distance (and stairs/lift cost).
+  const totalWeight = route.parts.reduce((a, p) => a + p.weight, 0) || 1;
+  const parts = route.parts.map(({ weight, ...p }) => ({
+    ...p,
+    plannedSeconds: Math.max(1, Math.round((weight / totalWeight) * seconds)),
+    bestSeconds: bestSplits[p.id] ?? null,
+    confirmedAt: p.placeName ? confirmations[CONNECTOR_BY_NAME.get(p.placeName)!.id] ?? null : null,
+  }));
   const fastS = fastest ? fastest.effMeters / MOBILITY.walk.speed : null;
   const freeS = stepFree ? stepFree.effMeters / MOBILITY.walk.speed : null;
   const gapSeconds = fastS !== null && freeS !== null ? Math.max(0, Math.round(freeS - fastS)) : null;
@@ -173,7 +248,7 @@ export async function planRoute(input: PlanInput) {
       timeLabel: fmtSeconds(seconds),
       distanceLabel: `${route.meters} m`,
       via: route.via,
-      steps: route.steps,
+      parts,
       compare: {
         fastest: fastS !== null && fastLeg ? { seconds: Math.round(fastS), label: fmtSeconds(fastS), via: fastLeg.via } : null,
         stepFree: freeS !== null && freeLeg ? { seconds: Math.round(freeS), label: fmtSeconds(freeS), via: freeLeg.via } : null,
@@ -194,7 +269,7 @@ export async function planRoute(input: PlanInput) {
       fastestSegments: routeDiffers ? fastLeg!.segments : null,
       start: allPts[0],
       end: allPts[allPts.length - 1],
-      obstacles: obstacles.map((o) => ({ p: o.p, label: o.label, affects: o.affects })),
+      obstacles: obstacles.map((o) => ({ id: o.placeId, p: o.p, label: o.label, affects: o.affects, radius: o.radius ?? 4, level: o.level ?? (o.placeId.startsWith("og:") ? 1 : 0) })),
     },
   };
 }
