@@ -26,7 +26,8 @@ export interface Attempt {
 
 export type Mobility = "walk" | "cane" | "wheelchair";
 
-const routeKey = (fromId: string, toId: string, mobility: Mobility) => `${fromId}->${toId}:${mobility}`;
+const keyFor = (fromId: string, toId: string, mobility: Mobility) => `${fromId}->${toId}:${mobility}`;
+const routeKey = keyFor;
 
 const url = process.env.DATABASE_URL ?? process.env.POSTGRES_URL;
 const sql = url ? neon(url) : null;
@@ -38,6 +39,7 @@ const SCHEMA = [
   `create table if not exists ttf_attempts (id bigserial primary key, route_key text not null, holder text not null, seconds integer not null, recorded_at timestamptz not null default now())`,
   `create index if not exists ttf_attempts_route_seconds on ttf_attempts (route_key, seconds)`,
   `alter table ttf_attempts add column if not exists splits jsonb`,
+  `create table if not exists ttf_deviations (id bigserial primary key, route_key text not null, part_id text, part_title text, reason text not null, note text, p jsonb, level integer, created_at timestamptz not null default now())`,
 ];
 let ready: Promise<void> | null = null;
 
@@ -60,6 +62,7 @@ const mem = {
   confirm: new Map<string, string>(),
   attempts: new Map<string, Attempt[]>(),
   splits: new Map<string, Record<string, number>[]>(),
+  deviations: [] as Deviation[],
 };
 
 export async function getObstacles(): Promise<Record<string, ObstacleRecord>> {
@@ -150,4 +153,35 @@ export async function submitAttempt(fromId: string, toId: string, mobility: Mobi
   }
   const goldSplits = splits ? Object.keys(splits).filter((id) => !(id in goldBefore) || splits[id] < goldBefore[id]) : [];
   return { isNewRecord: !before || seconds < before.seconds, previousRecord: before, rank, goldSplits, top: await getLeaderboard(fromId, toId, mobility) };
+}
+
+export interface Deviation {
+  routeKey: string;
+  partId: string | null;
+  partTitle: string | null;
+  reason: string;
+  note: string | null;
+  p: [number, number] | null;
+  level: 0 | 1 | null;
+  createdAt: string;
+}
+
+/** Someone left the planned route: where, and why. Shows organisers where the routing is wrong. */
+export async function addDeviation(fromId: string, toId: string, mobility: Mobility, d: Omit<Deviation, "routeKey" | "createdAt">) {
+  const routeKey = keyFor(fromId, toId, mobility);
+  const q = await db();
+  if (q) {
+    await q.query(
+      `insert into ttf_deviations (route_key, part_id, part_title, reason, note, p, level) values ($1, $2, $3, $4, $5, $6, $7)`,
+      [routeKey, d.partId, d.partTitle, d.reason, d.note, d.p ? JSON.stringify(d.p) : null, d.level]
+    );
+  } else mem.deviations.push({ ...d, routeKey, createdAt: new Date().toISOString() });
+}
+
+export async function countDeviations(fromId: string, toId: string, mobility: Mobility): Promise<number> {
+  const routeKey = keyFor(fromId, toId, mobility);
+  const q = await db();
+  if (!q) return mem.deviations.filter((d) => d.routeKey === routeKey).length;
+  const [{ n }] = await q.query(`select count(*)::int as n from ttf_deviations where route_key = $1`, [routeKey]);
+  return Number(n);
 }

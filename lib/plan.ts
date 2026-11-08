@@ -1,7 +1,7 @@
 import type { Pt, RouteResult } from "./routing";
 import { simTime } from "./crowd";
 import {
-  ROUTER, STAIRS_NODES, CONNECTOR_BY_NAME, levelOf, connectorOf, crowdFactors, findPlace, suggestPlaces, standInfo, areaAt,
+  ROUTER, STAIRS_NODES, CONNECTOR_BY_NAME, levelOf, connectorOf, crowdFactors, findPlace, suggestPlaces, standInfo, areaAt, nearestNodeOn,
   EXAMPLE_PLACES, type Place,
 } from "./venue";
 import { STAIRS_COST_M, LIFT_COST_M } from "./og";
@@ -168,11 +168,19 @@ export interface PlanInput {
   to: string;
   mobility: Mobility;
   avoidCrowds: boolean;
+  /** start at a point picked on the map ("where I am now") instead of the named place in `from` */
+  fromPoint?: { x: number; y: number; level: 0 | 1 };
+}
+
+function pointPlace(fp: NonNullable<PlanInput["fromPoint"]>): Place | null {
+  const p: Pt = [fp.x, fp.y];
+  const node = nearestNodeOn(p, fp.level === 1 ? "og" : "eg");
+  return node ? { id: "point", name: "Your position", instances: [{ name: "Your position", anchors: [node], p }] } : null;
 }
 
 export async function planRoute(input: PlanInput) {
   const { mobility, avoidCrowds } = input;
-  const from = findPlace(input.from);
+  const from = input.fromPoint ? pointPlace(input.fromPoint) : findPlace(input.from);
   if (!from) return { ok: false as const, error: unresolved(input.from) };
   const to = findPlace(input.to);
   if (!to) return { ok: false as const, error: unresolved(input.to) };
@@ -190,8 +198,12 @@ export async function planRoute(input: PlanInput) {
   const crowd = (space: number) => crowdFactors(t, space);
   const profile = MOBILITY[mobility];
 
-  const run = (stairs: number, stepFree: boolean, space: number) =>
-    ROUTER.route(fa, ta, { blocked: blockedFor(obstacles, stepFree), stairsNodes: STAIRS_NODES, stairsFactor: stairs, crowd: crowd(space), avoidCrowd: avoidCrowds });
+  const run = (stairs: number, stepFree: boolean, space: number) => {
+    const blocked = blockedFor(obstacles, stepFree);
+    // You're already standing there: an obstacle reported right next to you must not trap you.
+    for (const n of fa) blocked.delete(n);
+    return ROUTER.route(fa, ta, { blocked, stairsNodes: STAIRS_NODES, stairsFactor: stairs, crowd: crowd(space), avoidCrowd: avoidCrowds });
+  };
 
   // The selected profile's route, plus fastest vs step-free at the same walking pace for the comparison,
   // so the gap is the detour (what better information can shrink), not the difference in speed.

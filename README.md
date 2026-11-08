@@ -33,7 +33,7 @@ other stands in the same category.
 
 ## Code
 
-- `app/api/mcp/route.ts` — the MCP server (tools below) and the `ui://widget/route-map-3d-v2.html` widget resource
+- `app/api/mcp/route.ts` — the MCP server (tools below) and the `ui://widget/route-map-3d-v5.html` widget resource
 - `lib/venue.ts` — data loading, the combined EG + OG graph, place lookup (`findPlace`)
 - `lib/og.ts` — the 1. OG floor and its stairs/lifts
 - `lib/routing.ts` — Dijkstra router (ported from team-05): blocked nodes, stairs factor per profile, crowd factor
@@ -51,10 +51,11 @@ other stands in the same category.
 
 | Tool | Purpose |
 |---|---|
-| `find_accessible_route` | Route for a mobility profile (`walk` default, `cane`, `wheelchair`), optionally avoiding crowds, with fastest vs step-free comparison, record and the 3D widget |
+| `find_accessible_route` | Route (optionally from a map point, `fromPoint`, used for detours) for a mobility profile (`walk` default, `cane`, `wheelchair`), optionally avoiding crowds, with fastest vs step-free comparison, record and the 3D widget |
 | `search_places` | Resolve an unclear place name and list close matches |
 | `report_obstacle` | Mark a place blocked (for everyone, or only wheelchair users, e.g. a broken lift), or `clear` = works / confirmed working |
 | `list_obstacles` | All current obstacles as fixed cards (who it affects, where, when) with a map, in its own widget (`ui://widget/obstacles-v1.html`, also at `/obstacles`) |
+| `report_deviation` | Someone left the planned route: which part, why (shorter / blocked / more accessible / lost), where they are; stored in `ttf_deviations` for organisers |
 | `clear_obstacle` | Mark an obstacle (by id, incl. map-marked areas) as resolved; the "Cleared" button in the obstacles widget |
 | `get_leaderboard` | Fastest times for a route and profile |
 | `log_attempt` | Submit a race time with optional per-part splits; faster ones replace the record, implausible ones (< 40 % of the walking time) aren't saved |
@@ -73,7 +74,7 @@ other stands in the same category.
 ## The widget
 
 `find_accessible_route` sets `_meta["openai/outputTemplate"]` and `_meta.ui.resourceUri` to
-`ui://widget/route-map-3d-v3.html`. Overview: mobility switch, 3D map (heatmap, avoid crowds), the gap card with
+`ui://widget/route-map-3d-v5.html`. Overview: mobility switch, 3D map (heatmap, avoid crowds), the gap card with
 **Start**, a collapsed leaderboard and **Report obstacle**. Navigation: total timer, current part with live split vs
 best/planned, **Next**, targeted questions, split list. Buttons call the tools through `window.openai.callTool` (on
 `/map` a small stand-in calls `/api/mcp`); a running navigation survives reloads via `setWidgetState`. The tool's text

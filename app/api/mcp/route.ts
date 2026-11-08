@@ -2,7 +2,7 @@ import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
 import { ROUTER, findPlace, suggestPlaces, levelOf, areaAt, EXAMPLE_PLACES } from "@/lib/venue";
 import { planRoute, fmtSeconds, MOBILITY } from "@/lib/plan";
-import { getObstacles, setObstacle, getLeaderboard, submitAttempt, PERSISTENT } from "@/lib/store";
+import { getObstacles, setObstacle, getLeaderboard, submitAttempt, addDeviation, PERSISTENT } from "@/lib/store";
 import { ROUTE_MAP_WIDGET_URI, ROUTE_MAP_WIDGET_HTML } from "@/lib/widget";
 import { OBSTACLES_WIDGET_URI, OBSTACLES_WIDGET_HTML } from "@/lib/obstacles-widget";
 import { obstacleList } from "@/lib/obstacles";
@@ -69,6 +69,10 @@ const handler = createMcpHandler((server) => {
         to: z.string().describe("Destination, e.g. 'TTF Hackathon', 'Tisch 12', 'ice cream', an exhibitor name"),
         mobility: mobilitySchema.default("walk").describe("walk | cane (crutches, slow) | wheelchair (no stairs)"),
         avoidCrowds: z.boolean().default(true).describe("Route around (simulated) crowded spots"),
+        fromPoint: z
+          .object({ x: z.number(), y: z.number(), level: z.union([z.literal(0), z.literal(1)]) })
+          .optional()
+          .describe("Start at a point on the venue map (used by the widget to re-plan from where the user is now); 'from' is then only a label"),
       }),
       annotations: { readOnlyHint: true },
       _meta: {
@@ -79,8 +83,8 @@ const handler = createMcpHandler((server) => {
         "openai/widgetAccessible": true,
       },
     },
-    async ({ from, to, mobility, avoidCrowds }) => {
-      const plan = await planRoute({ from, to, mobility, avoidCrowds });
+    async ({ from, to, mobility, avoidCrowds, fromPoint }) => {
+      const plan = await planRoute({ from, to, mobility, avoidCrowds, fromPoint });
       if (!plan.ok) return { content: [text(plan.error)], isError: true };
       const d = plan.data;
       const mapUrl = `${getBaseUrl()}/map?${new URLSearchParams({ from, to, mobility })}`;
@@ -203,6 +207,41 @@ const handler = createMcpHandler((server) => {
         content: [text(`Thanks! Marked "${record.label}" in ${area}. Routes now go around it.`)],
         structuredContent: { placeId: record.placeId, label: record.label, p, level, radius, affects },
       };
+    }
+  );
+
+  server.registerTool(
+    "report_deviation",
+    {
+      title: "Report leaving the planned route",
+      description:
+        "Records that someone left the planned route (which part, why, optionally where they are now). Helps organisers see where routing is wrong. Used by the route widget.",
+      inputSchema: z.object({
+        from: z.string(),
+        to: z.string(),
+        mobility: mobilitySchema.default("walk"),
+        partId: z.string().optional(),
+        partTitle: z.string().max(120).optional(),
+        reason: z.enum(["shorter", "blocked", "accessible", "lost", "other"]),
+        note: z.string().max(200).optional(),
+        x: z.number().optional(),
+        y: z.number().optional(),
+        level: z.union([z.literal(0), z.literal(1)]).optional(),
+      }),
+      _meta: { "openai/widgetAccessible": true },
+    },
+    async ({ from, to, mobility, partId, partTitle, reason, note, x, y, level }) => {
+      const a = findPlace(from),
+        b = findPlace(to);
+      await addDeviation(a?.id ?? from, b?.id ?? to, mobility, {
+        partId: partId ?? null,
+        partTitle: partTitle ?? null,
+        reason,
+        note: note?.trim() || null,
+        p: x !== undefined && y !== undefined ? [Math.round(x * 10) / 10, Math.round(y * 10) / 10] : null,
+        level: level ?? null,
+      });
+      return { content: [text("Thanks! Noted where you left the route, so we can improve it.")], structuredContent: { saved: true } };
     }
   );
 

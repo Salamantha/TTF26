@@ -101,6 +101,21 @@ export function levelOf(nodeId: string): "eg" | "og" {
 
 export const CONNECTOR_BY_NAME = new Map(CONNECTORS.map((k) => [k.name, k]));
 
+/** Nearest walkway node on one floor (stair/lift ends excluded), e.g. for "route from where I am now". */
+export function nearestNodeOn(p: Pt, level: "eg" | "og"): string | null {
+  let best: string | null = null,
+    bd = Infinity;
+  for (const n of ROUTER.nodes) {
+    if (levelOf(n.id) !== level || n.id.endsWith(":b") || n.id.endsWith(":t")) continue;
+    const d = (n.p[0] - p[0]) ** 2 + (n.p[1] - p[1]) ** 2;
+    if (d < bd) {
+      bd = d;
+      best = n.id;
+    }
+  }
+  return best;
+}
+
 export function connectorOf(nodeId: string) {
   return CONNECTORS.find((k) => nodeId === `${k.id}:b` || nodeId === `${k.id}:t`);
 }

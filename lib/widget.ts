@@ -5,7 +5,7 @@ import { VENUE, OG, EXHIBITORS_BY_SPACE, HOTSPOTS } from "./venue";
 import { CONNECTORS, OG_AREAS, OG_TABLES, OG_ELEVATION, OG_ROOM_H } from "./og";
 import { WIDGET_JS } from "./widget-bundle.generated";
 
-export const ROUTE_MAP_WIDGET_URI = "ui://widget/route-map-3d-v3.html";
+export const ROUTE_MAP_WIDGET_URI = "ui://widget/route-map-3d-v5.html";
 
 // Approximate outer hall heights in metres, from team-05's Map3D.
 const HALL_HEIGHTS: Record<string, number> = {
@@ -122,6 +122,26 @@ const STYLE = `
 #ttf-splits li.done{color:var(--fg)}
 #ttf-splits li.current{background:var(--card);color:var(--fg);font-weight:700;box-shadow:inset 3px 0 0 #facc15}
 .s-delta,.s-time{text-align:right;font-family:ui-monospace,monospace}
+.mode-row{margin-bottom:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.untimed-tag{font-size:11px;color:var(--muted);border:1px dashed var(--line);border-radius:999px;padding:2px 8px}
+#ttf-root.untimed #ttf-nav-total,#ttf-root.untimed .nav-split{display:none}
+.starts{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
+#ttf-root .starts button.big{margin-top:0}
+.hint{margin-top:8px;text-align:center}
+.help-row{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px}
+#ttf-root button.small{font-size:11px;color:var(--muted)}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.map2d .you{fill:#2563eb;stroke:#fff;stroke-width:.8}
+.mode{display:inline-flex;align-items:center;gap:5px;font-size:12px;padding:4px 10px 4px 6px;border-radius:999px;border:1px solid}
+.mode svg{width:18px;height:18px;fill:currentColor}
+.mode span{opacity:.85}
+.mode.free{color:#1d4ed8;background:#dbeafe;border-color:#93c5fd}
+.mode.cane{color:#7e22ce;background:#f3e8ff;border-color:#d8b4fe}
+.mode.walk{color:var(--muted);background:var(--card);border-color:var(--line)}
+.dark .mode.free{color:#93c5fd;background:#172554;border-color:#1e40af}
+.dark .mode.cane{color:#d8b4fe;background:#3b0764;border-color:#6b21a8}
+.thanks{margin-top:10px;padding:10px 12px;border-radius:8px;background:var(--card);border:1px solid var(--ok);font-size:13px;line-height:1.45}
+.thanks strong{color:var(--ok)}
 .floors{display:flex;gap:6px;margin-top:8px}
 .map2d{display:block;width:100%;height:240px;margin-top:8px;border:1px solid var(--line);border-radius:8px;background:var(--card);cursor:crosshair}
 .map2d .hall{fill:var(--chip);stroke:var(--line);stroke-width:.4}
@@ -162,6 +182,7 @@ export const ROUTE_MAP_WIDGET_HTML = `<style>${STYLE}</style>
     <div id="ttf-stand" hidden></div>
   </div>
   <div class="card" id="ttf-nav" hidden>
+    <div class="mode-row" id="ttf-nav-mode"></div>
     <div class="nav-top"><span class="muted" id="ttf-nav-step"></span><span id="ttf-nav-total">0:00.0</span><button class="ghost" id="ttf-nav-stop" type="button" aria-label="Stop">✕</button></div>
     <div class="nav-cur">
       <div><div id="ttf-nav-title"></div><div class="muted" id="ttf-nav-meta"></div></div>
@@ -169,7 +190,11 @@ export const ROUTE_MAP_WIDGET_HTML = `<style>${STYLE}</style>
     </div>
     <button class="primary big" id="ttf-nav-next" type="button">Next ▸</button>
     <div id="ttf-q"></div>
-    <div class="row"><span></span><button id="ttf-nav-obstacle" type="button">⚠ Obstacle here</button></div>
+    <div class="help-row">
+      <button id="ttf-nav-blocked" type="button">⚠ Blocked – find another way</button>
+      <button id="ttf-nav-deviate" type="button">↪ I went a different way</button>
+    </div>
+    <div class="row"><span></span><button class="ghost small" id="ttf-nav-untime" type="button">Stop timer, keep navigating</button></div>
     <ol id="ttf-splits"></ol>
   </div>
   <div class="card" id="ttf-finish" hidden></div>
