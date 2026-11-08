@@ -1201,8 +1201,14 @@ function start() {
 
   // ---------------------------------------------------------------- data in
 
+  // ChatGPT re-sends the same tool output as a fresh object whenever widget state is saved; only a really new
+  // route may reset the view (otherwise "Arrived" would jump from the finish screen back to the overview).
+  let lastJson = "";
   const show = (d: RouteData | null | undefined, force = false) => {
-    if (!d || !d.segments || !d.parts || (d === last && !force)) return;
+    if (!d || !d.segments || !d.parts) return;
+    const json = JSON.stringify(d);
+    if (json === lastJson && !force) return;
+    lastJson = json;
     last = d;
     drawRoute(d);
     renderHeader(d);

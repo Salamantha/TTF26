@@ -4,6 +4,8 @@ import { ROUTER, findPlace, suggestPlaces, levelOf, areaAt, EXAMPLE_PLACES } fro
 import { planRoute, fmtSeconds, MOBILITY } from "@/lib/plan";
 import { getObstacles, setObstacle, getLeaderboard, submitAttempt, PERSISTENT } from "@/lib/store";
 import { ROUTE_MAP_WIDGET_URI, ROUTE_MAP_WIDGET_HTML } from "@/lib/widget";
+import { OBSTACLES_WIDGET_URI, OBSTACLES_WIDGET_HTML } from "@/lib/obstacles-widget";
+import { obstacleList } from "@/lib/obstacles";
 
 function getBaseUrl() {
   if (process.env.APP_BASE_URL) return process.env.APP_BASE_URL;
@@ -38,6 +40,20 @@ const handler = createMcpHandler((server) => {
           _meta: { "openai/widgetPrefersBorder": true },
         },
       ],
+    })
+  );
+
+  server.registerResource(
+    "obstacles-widget",
+    OBSTACLES_WIDGET_URI,
+    {
+      _meta: {
+        "openai/widgetDescription":
+          "Cards for every reported obstacle (name, where, who it affects, when it was reported) with a small map and a 'Cleared' button. It shows everything; keep the chat reply to one short sentence.",
+      },
+    },
+    async () => ({
+      contents: [{ uri: OBSTACLES_WIDGET_URI, mimeType: "text/html+skybridge", text: OBSTACLES_WIDGET_HTML, _meta: { "openai/widgetPrefersBorder": true } }],
     })
   );
 
@@ -194,18 +210,47 @@ const handler = createMcpHandler((server) => {
     "list_obstacles",
     {
       title: "List current obstacles",
-      description: "Lists all currently reported obstacles in the venue.",
+      description: "Shows all currently reported obstacles in the venue as cards (who they affect, where, when reported) with a map.",
       inputSchema: z.object({}),
       annotations: { readOnlyHint: true },
+      _meta: {
+        ui: { resourceUri: OBSTACLES_WIDGET_URI },
+        "openai/outputTemplate": OBSTACLES_WIDGET_URI,
+        "openai/toolInvocation/invoking": "Checking obstacles…",
+        "openai/toolInvocation/invoked": "Obstacles",
+        "openai/widgetAccessible": true,
+      },
     },
     async () => {
-      const blocked = Object.values(await getObstacles()).filter((o) => o.status === "blocked");
-      if (!blocked.length) return { content: [text("No obstacles reported right now.")], structuredContent: { obstacles: [] } };
-      const lines = blocked.map((o) => `- ${o.label}: blocked${o.affects === "wheelchair" ? " for wheelchair users" : ""}${o.note ? ` (${o.note})` : ""}, reported ${o.reportedAt}`);
+      const data = await obstacleList();
+      const n = data.obstacles.length;
+      const wc = data.obstacles.filter((o) => o.affects === "wheelchair").length;
+      const facts = n
+        ? `${n} active obstacle${n > 1 ? "s" : ""} (${wc} only affect wheelchair users): ${data.obstacles.map((o) => `${o.title}${o.where ? ` – ${o.where}` : ""}`).join("; ")}.`
+        : "No obstacles reported right now.";
       return {
-        content: [text(lines.join("\n"))],
-        structuredContent: { obstacles: blocked.map(({ placeId, label, affects, note, reportedAt }) => ({ placeId, label, affects, note, reportedAt })) },
+        content: [text(`${facts}
+The widget shows each obstacle as a card with who it affects and a map. Reply with one short sentence only; don't list the obstacles again.`)],
+        structuredContent: data,
       };
+    }
+  );
+
+  server.registerTool(
+    "clear_obstacle",
+    {
+      title: "Mark an obstacle as resolved",
+      description: "Marks a reported obstacle (by its id from list_obstacles) as resolved, so routing uses that spot again.",
+      inputSchema: z.object({ id: z.string().min(1) }),
+      _meta: { "openai/widgetAccessible": true },
+    },
+    async ({ id }) => {
+      const current = (await getObstacles())[id];
+      if (!current || current.status !== "blocked") {
+        return { content: [text("That obstacle is already cleared.")], structuredContent: await obstacleList() };
+      }
+      await setObstacle({ ...current, status: "clear" });
+      return { content: [text(`Thanks! "${current.label}" is marked as resolved.`)], structuredContent: await obstacleList() };
     }
   );
 

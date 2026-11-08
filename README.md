@@ -54,7 +54,8 @@ other stands in the same category.
 | `find_accessible_route` | Route for a mobility profile (`walk` default, `cane`, `wheelchair`), optionally avoiding crowds, with fastest vs step-free comparison, record and the 3D widget |
 | `search_places` | Resolve an unclear place name and list close matches |
 | `report_obstacle` | Mark a place blocked (for everyone, or only wheelchair users, e.g. a broken lift), or `clear` = works / confirmed working |
-| `list_obstacles` | Everything currently reported blocked |
+| `list_obstacles` | All current obstacles as fixed cards (who it affects, where, when) with a map, in its own widget (`ui://widget/obstacles-v1.html`, also at `/obstacles`) |
+| `clear_obstacle` | Mark an obstacle (by id, incl. map-marked areas) as resolved; the "Cleared" button in the obstacles widget |
 | `get_leaderboard` | Fastest times for a route and profile |
 | `log_attempt` | Submit a race time with optional per-part splits; faster ones replace the record, implausible ones (< 40 % of the walking time) aren't saved |
 | `mark_obstacle_area` | Save an obstacle at a point on the map (orange area, radius in m, floor) that routing avoids |
