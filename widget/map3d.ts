@@ -860,7 +860,16 @@ function start() {
       const lab = el("span", "bar-label", undefined, row);
       lab.append(icon(m), label);
       const track = el("span", "bar", undefined, row);
-      el("i", cls, undefined, track).style.width = `${r ? (r.seconds / max) * 100 : 0}%`;
+      // The step-free bar is the stairs bar plus a striped yellow piece: that piece is the gap.
+      const base = cls === "free" && fastest && r && r.seconds > fastest.seconds ? fastest.seconds : r?.seconds ?? 0;
+      const b = el("i", cls, undefined, track);
+      b.style.width = `${(base / max) * 100}%`;
+      if (r && base < r.seconds) {
+        b.classList.add("cut");
+        const g = el("i", "gap", undefined, track);
+        g.style.width = `${((r.seconds - base) / max) * 100}%`;
+        g.title = `the gap: +${r.seconds - base} s`;
+      }
       el("span", "bar-time", r ? clock(r.seconds) : "–", row);
     };
     bar("walk", "Stairs", fastest, "fast");
@@ -961,7 +970,13 @@ function start() {
     list.replaceChildren(
       ...d.parts.map((p, i) => {
         const li = el("li", i < run.idx ? "done" : i === run.idx ? "current" : "");
-        el("span", "s-name", (i < run.idx ? "✓ " : "") + p.title, li);
+        const name = el("span", "s-name", undefined, li);
+        if (i < run.idx) {
+          const fp = el("i", "fp-ico", undefined, name);
+          fp.setAttribute("role", "img");
+          fp.setAttribute("aria-label", "done");
+        }
+        name.append(p.title);
         const sec = run.splits[p.id];
         if (!run.timed) {
           el("span", "s-delta", "", li);
@@ -1107,6 +1122,21 @@ function start() {
   function thankYou(card: HTMLElement, d: RouteData, run: Run) {
     // Everyone gets thanked, record or not, timed or not: every run and every answer keeps the route current.
     const thanks = el("div", "thanks", undefined, card);
+    // The TacticalNewt newt walks across once, leaving fading footprints.
+    const logo = document.querySelector<HTMLImageElement>("#ttf-root .newt-logo");
+    if (logo) {
+      const walk = el("div", "newt-walk", undefined, thanks);
+      walk.setAttribute("aria-hidden", "true");
+      for (let i = 0; i < 9; i++) {
+        const fp = el("i", "fp", undefined, walk);
+        fp.style.left = `calc(${i * 10}% - ${i * 3}px)`;
+        fp.style.top = i % 2 ? "26px" : "5px";
+        fp.style.animationDelay = `${i * 0.26}s`;
+      }
+      const img = el("img", "", undefined, walk);
+      img.src = logo.src;
+      img.alt = "";
+    }
     el("strong", "", "Thank you!", thanks);
     el(
       "div",

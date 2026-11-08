@@ -1,8 +1,9 @@
 // Obstacle list widget for ChatGPT: the same card layout every time (instead of ChatGPT formatting free text),
 // a small 2D map with the obstacle areas, and a "Cleared" button per obstacle.
 import { VENUE, OG } from "./venue";
+import { NEWT_PNG, THEME_VARS, THEME_VARS_DARK, BRAND_CSS } from "./brand";
 
-export const OBSTACLES_WIDGET_URI = "ui://widget/obstacles-v1.html";
+export const OBSTACLES_WIDGET_URI = "ui://widget/obstacles-v2.html";
 
 const base = {
   halls: VENUE.halls.filter((h) => h.poly && h.poly.length > 2).map((h) => h.poly),
@@ -10,10 +11,11 @@ const base = {
 };
 
 const STYLE = `
-#ob-root{--fg:#1f2328;--muted:#57606a;--card:#fff;--line:#d0d7de;--chip:#f6f8fa;--accent:#0969da;--ok:#1a7f37;--wc:#bc4c00;--wcbg:#fff1e5;--all:#cf222e;--allbg:#ffebe9;font-family:system-ui,-apple-system,sans-serif;color:var(--fg);background:var(--card);border-radius:12px;padding:12px}
-#ob-root.dark{--fg:#e6edf3;--muted:#9da7b3;--card:#0d1117;--line:#30363d;--chip:#161b22;--accent:#58a6ff;--ok:#3fb950;--wc:#f0883e;--wcbg:#3d1d00;--all:#ff7b72;--allbg:#3c0d0c}
+#ob-root{${THEME_VARS}--wc:#A3480B;--wcbg:#FDEBDD;--all:#B3261E;--allbg:#FBE4E1;font-family:system-ui,-apple-system,sans-serif;color:var(--fg);background:var(--card);border-radius:12px;padding:12px}
+#ob-root.dark{${THEME_VARS_DARK}--wc:#F59A55;--wcbg:#3A2210;--all:#FF7B72;--allbg:#3C1512}
+${BRAND_CSS}
 #ob-root [hidden]{display:none!important}
-#ob-head{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+#ob-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px}
 #ob-head h2{font-size:15px;margin:0}
 .pill{font:600 12px system-ui,sans-serif;padding:2px 8px;border-radius:999px}
 .pill.count{background:var(--wcbg);color:var(--wc)}
@@ -173,7 +175,7 @@ const SCRIPT = `
 
 export const OBSTACLES_WIDGET_HTML = `<style>${STYLE}</style>
 <div id="ob-root">
-  <div id="ob-head"><h2>Current obstacles</h2><span class="pill count" id="ob-count">…</span></div>
+  <div id="ob-head"><div class="brand"><img class="newt-logo" src="${NEWT_PNG}" alt="TacticalNewt"><div><p class="brand-name">Mind the Gap</p><h2>Current obstacles</h2></div></div><span class="pill count" id="ob-count">…</span></div>
   <svg id="ob-map" role="img" aria-label="Map of the reported obstacles" hidden></svg>
   <div id="ob-list"></div>
   <div id="ob-empty" hidden>No obstacles reported. All routes are clear.</div>

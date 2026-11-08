@@ -18,7 +18,7 @@ export async function GET(req: Request) {
 
   return new Response(
     `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
-      `<title>TTF Accessible Route</title><style>body{margin:0;padding:16px;background:#f6f7f9}@media (prefers-color-scheme:dark){body{background:#010409}}#ttf-root{margin:0 auto;max-width:900px}#ttf-3d{height:60vh}</style>` +
+      `<title>TTF Accessible Route</title><style>body{margin:0;padding:16px;background:#EFEADC}@media (prefers-color-scheme:dark){body{background:#0B0A07}}#ttf-root{margin:0 auto;max-width:900px}#ttf-3d{height:60vh}</style>` +
       `</head><body>${body}</body></html>`,
     { status: plan.ok ? 200 : 404, headers: { "content-type": "text/html; charset=utf-8" } }
   );

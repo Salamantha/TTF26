@@ -4,8 +4,9 @@
 import { VENUE, OG, EXHIBITORS_BY_SPACE, HOTSPOTS } from "./venue";
 import { CONNECTORS, OG_AREAS, OG_TABLES, OG_ELEVATION, OG_ROOM_H } from "./og";
 import { WIDGET_JS } from "./widget-bundle.generated";
+import { NEWT_PNG, FOOT_MASK, THEME_VARS, THEME_VARS_DARK, BRAND_CSS } from "./brand";
 
-export const ROUTE_MAP_WIDGET_URI = "ui://widget/route-map-3d-v5.html";
+export const ROUTE_MAP_WIDGET_URI = "ui://widget/route-map-3d-v6.html";
 
 // Approximate outer hall heights in metres, from team-05's Map3D.
 const HALL_HEIGHTS: Record<string, number> = {
@@ -41,8 +42,9 @@ const venue3d = {
 };
 
 const STYLE = `
-#ttf-root{--fg:#1f2328;--muted:#57606a;--card:#fff;--line:#d0d7de;--chip:#f6f8fa;--accent:#0969da;--ok:#1a7f37;--warn:#bf8700;--bad:#cf222e;--gold:#b08800;font-family:system-ui,-apple-system,sans-serif;color:var(--fg);background:var(--card);border-radius:12px;padding:12px}
-#ttf-root.dark{--fg:#e6edf3;--muted:#9da7b3;--card:#0d1117;--line:#30363d;--chip:#161b22;--accent:#58a6ff;--ok:#3fb950;--warn:#d29922;--bad:#f85149;--gold:#e3b341}
+#ttf-root{${THEME_VARS}font-family:system-ui,-apple-system,sans-serif;color:var(--fg);background:var(--card);border-radius:12px;padding:12px}
+#ttf-root.dark{${THEME_VARS_DARK}}
+${BRAND_CSS}
 #ttf-root.busy{cursor:progress}
 #ttf-root.busy #ttf-wrap,#ttf-root.busy .card{opacity:.6;transition:opacity .2s}
 #ttf-root [hidden]{display:none!important}
@@ -52,14 +54,14 @@ const STYLE = `
 #ttf-profile{display:flex;gap:2px;background:var(--chip);border:1px solid var(--line);border-radius:10px;padding:3px;flex:none}
 #ttf-root #ttf-profile button{display:flex;border:0;background:none;color:var(--muted);padding:5px 7px;border-radius:7px;cursor:pointer}
 #ttf-root #ttf-profile button svg{width:20px;height:20px;fill:currentColor}
-#ttf-root #ttf-profile button[aria-pressed=true]{background:var(--accent);color:#fff}
+#ttf-root #ttf-profile button[aria-pressed=true]{background:var(--accent);color:var(--on-accent)}
 #ttf-wrap{position:relative;border:1px solid var(--line);border-radius:10px;overflow:hidden}
 #ttf-3d{position:relative;width:100%;height:380px;touch-action:none}
 #ttf-root.navigating #ttf-3d{height:300px}
 #ttf-tools{position:absolute;right:8px;top:8px;display:flex;gap:6px;z-index:2}
 #ttf-root button{font:600 12px system-ui,sans-serif;padding:6px 10px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer}
 #ttf-root button:disabled{opacity:.5;cursor:default}
-#ttf-root button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+#ttf-root button.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
 #ttf-root button.big{font-size:15px;padding:10px 18px;border-radius:10px;width:100%;margin-top:10px}
 #ttf-root button.ghost{border:0;background:none;padding:4px 6px}
 #ttf-root button[aria-pressed=true]{box-shadow:inset 0 0 0 1px var(--accent);background:var(--chip)}
@@ -92,18 +94,19 @@ const STYLE = `
 .bar-row{display:grid;grid-template-columns:96px 1fr 44px;gap:8px;align-items:center;margin:5px 0}
 .bar-label{display:flex;align-items:center;gap:4px;font-size:12px;color:var(--muted)}
 .bar-label svg{width:16px;height:16px;fill:currentColor}
-.bar{height:10px;background:var(--line);border-radius:5px;overflow:hidden}
-.bar i{display:block;height:100%;border-radius:5px}
-.bar i.fast{background:#d97706}
-.bar i.free{background:#2563eb}
-.bar i.you{background:var(--ok)}
+.bar{display:flex;height:10px;background:var(--line);border-radius:5px;overflow:hidden}
+.bar i{display:block;height:100%;border-radius:5px;flex:none}
+.bar i.fast,.bar i.free{background:var(--fg)}
+.bar i.free.cut{border-radius:5px 0 0 5px}
+.bar i.gap{border-radius:0 5px 5px 0;background:repeating-linear-gradient(45deg,var(--brand) 0 4px,var(--line) 4px 7px)}
+.bar i.you{background:var(--brand)}
 .bar-time{text-align:right;font-weight:700;font-variant-numeric:tabular-nums}
 #ttf-more{display:flex;gap:8px;align-items:flex-start;justify-content:space-between;margin-top:8px}
 #ttf-root details summary{cursor:pointer;font-weight:600;font-size:12px;color:var(--muted)}
 #ttf-root details p{margin:6px 0 0}
 .lb{margin:6px 0 0;padding-left:20px;font-size:13px}
 .lb li{display:flex;justify-content:space-between;gap:12px;font-variant-numeric:tabular-nums}
-#ttf-root a.link{color:var(--accent);font-size:12px}
+#ttf-root a.link{color:var(--link);font-size:12px}
 #ttf-stand{margin-top:8px}
 .nav-top{display:flex;align-items:center;justify-content:space-between}
 #ttf-nav-total{font:800 30px ui-monospace,monospace;font-variant-numeric:tabular-nums}
@@ -120,7 +123,8 @@ const STYLE = `
 #ttf-splits{list-style:none;margin:10px 0 0;padding:0;font-size:12px}
 #ttf-splits li{display:grid;grid-template-columns:1fr 50px 52px;gap:6px;padding:3px 6px;border-radius:6px;color:var(--muted)}
 #ttf-splits li.done{color:var(--fg)}
-#ttf-splits li.current{background:var(--card);color:var(--fg);font-weight:700;box-shadow:inset 3px 0 0 #facc15}
+#ttf-splits li.current{background:var(--card);color:var(--fg);font-weight:700;box-shadow:inset 3px 0 0 var(--brand)}
+.fp-ico{display:inline-block;width:14px;height:14px;margin-right:5px;vertical-align:-2px;background:var(--fg);-webkit-mask:${FOOT_MASK} center/contain no-repeat;mask:${FOOT_MASK} center/contain no-repeat}
 .s-delta,.s-time{text-align:right;font-family:ui-monospace,monospace}
 .mode-row{margin-bottom:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .untimed-tag{font-size:11px;color:var(--muted);border:1px dashed var(--line);border-radius:999px;padding:2px 8px}
@@ -131,17 +135,17 @@ const STYLE = `
 .help-row{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px}
 #ttf-root button.small{font-size:11px;color:var(--muted)}
 .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
-.map2d .you{fill:#2563eb;stroke:#fff;stroke-width:.8}
+.map2d .you{fill:#16150F;stroke:#F2C230;stroke-width:.8}
 .mode{display:inline-flex;align-items:center;gap:5px;font-size:12px;padding:4px 10px 4px 6px;border-radius:999px;border:1px solid}
 .mode svg{width:18px;height:18px;fill:currentColor}
 .mode span{opacity:.85}
-.mode.free{color:#1d4ed8;background:#dbeafe;border-color:#93c5fd}
+.mode.free{color:#5C4500;background:#FCEFC2;border-color:#F2C230}
 .mode.cane{color:#7e22ce;background:#f3e8ff;border-color:#d8b4fe}
 .mode.walk{color:var(--muted);background:var(--card);border-color:var(--line)}
-.dark .mode.free{color:#93c5fd;background:#172554;border-color:#1e40af}
+.dark .mode.free{color:#F2C230;background:#2E2810;border-color:#6B5A16}
 .dark .mode.cane{color:#d8b4fe;background:#3b0764;border-color:#6b21a8}
-.thanks{margin-top:10px;padding:10px 12px;border-radius:8px;background:var(--card);border:1px solid var(--ok);font-size:13px;line-height:1.45}
-.thanks strong{color:var(--ok)}
+.thanks{margin-top:10px;padding:10px 12px;border-radius:8px;background:var(--card);border:1px solid var(--brand);font-size:13px;line-height:1.45}
+.thanks strong{color:var(--fg)}
 .floors{display:flex;gap:6px;margin-top:8px}
 .map2d{display:block;width:100%;height:240px;margin-top:8px;border:1px solid var(--line);border-radius:8px;background:var(--card);cursor:crosshair}
 .map2d .hall{fill:var(--chip);stroke:var(--line);stroke-width:.4}
@@ -157,7 +161,7 @@ const STYLE = `
 export const ROUTE_MAP_WIDGET_HTML = `<style>${STYLE}</style>
 <div id="ttf-root">
   <div id="ttf-head">
-    <div><h2 id="ttf-title">Salzburg Messe</h2><p class="sub" id="ttf-sub">Loading route…</p></div>
+    <div class="brand"><img class="newt-logo" src="${NEWT_PNG}" alt="TacticalNewt"><div><p class="brand-name">Mind the Gap</p><h2 id="ttf-title">Salzburg Messe</h2><p class="sub" id="ttf-sub">Loading route…</p></div></div>
     <div id="ttf-profile" role="group" aria-label="How do you get around?"></div>
   </div>
   <div id="ttf-wrap">
